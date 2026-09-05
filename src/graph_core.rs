@@ -509,25 +509,23 @@ pub mod ffi {
 }
 
 /// Sticky flag: replication may have a consumer. Set on any replica attach,
-/// role change or fork, and never cleared — a disconnected replica may resume
-/// from the backlog, so buffers must keep being built after the first attach.
+/// role change or fork, never cleared — a disconnected replica can resume from
+/// the backlog.
 ///
-/// **Starts `true`, and that is a correctness requirement rather than
-/// caution.** While it is false (and AOF is off) a write skips serializing
-/// effects altogether, which used to be safe because `replicate_effects` fell
-/// back to replaying the query text. With that fallback gone there is nothing
-/// behind this: a write that builds no buffer is a write the replica never
-/// hears about, permanently.
+/// **Starts `true`.** While it is false a write skips building its effects
+/// payload, and a write with no payload is one the replica never hears about.
+/// That was survivable when the fallback was replaying the query text; with
+/// query replay gone, nothing recovers it.
 ///
-/// `false` was reachable in the ordinary case, not a corner: `ReplicaChange`
-/// fires from Redis's `replicaPutOnline`, i.e. *after* the snapshot has been
-/// delivered, so every write between the sync's fork and the replica coming
-/// online produced no buffer. Latching earlier does not close it either —
-/// writes run on the thread pool and read this at query start, so one already
-/// in flight when the fork happens still commits without a buffer.
+/// Starting `false` lost writes in the ordinary case, not a rare one.
+/// `ReplicaChange` fires from Redis's `replicaPutOnline` — *after* the snapshot
+/// is delivered — so every write between the sync's fork and the replica coming
+/// online built no payload. Setting the flag earlier does not help: writes run
+/// on the thread pool and read it at query start, so one already in flight is
+/// past the check.
 ///
-/// Skipping is therefore an optimisation that needs a *positive* proof nothing
-/// consumes replication. We do not currently have one, so we do not skip.
+/// Skipping is an optimisation that needs positive proof nothing consumes
+/// replication. There is none, so it does not skip.
 pub static REPLICATION_CONSUMERS: AtomicBool = AtomicBool::new(true);
 
 pub struct ThreadedGraph {
@@ -1449,6 +1447,8 @@ pub(crate) fn finish_write(
     stats: &QueryStatistics,
 ) {
     let wq = WriteQueryOk::new(runtime, stats);
+    // `None` means the closure never ran, not that it failed:
+    // `with_graph_mut` yields it for a session still in reader mode.
     if session
         .with_graph_mut(|tg| commit_and_replicate(tg, ctx, key_name, wq))
         .is_none()
@@ -1484,26 +1484,33 @@ fn commit_and_replicate(
     key_name: &Arc<str>,
     wq: WriteQueryOk,
 ) {
-    // A write that changed something and produced no payload is data the
-    // replica will never see, and since query replay was removed there is
-    // nothing to recover it. Loud rather than silent: this is how the
-    // first-full-sync window went unnoticed.
-    if wq.modified && wq.effects_buffer.is_none() {
-        redis_module::logging::log_warning(format!(
-            "graph '{key_name}' was modified but produced no effects payload; \
-             the change will not reach replicas or the AOF"
-        ));
-    }
     // Index document changes were already applied by each `CommitOp` while this
     // query held the write lock (so a later operator in the same query could see
     // them); nothing left to publish but the matrix version.
     g.graph.commit(Arc::clone(&wq.graph));
     // Signal the key as modified so WATCH gets triggered.
     unsafe { ffi::signal_modified_key(ctx.ctx, key_name.as_bytes()) };
-    // Send replication while the GIL is held.
-    if wq.modified {
-        replicate_effects(ctx, key_name, wq.effects_buffer);
+
+    if !wq.modified {
+        return;
     }
+    // A write that changed something and produced no payload is data the
+    // replica will never see, and since query replay was removed there is
+    // nothing to recover it. Loud rather than silent: this is how the
+    // first-full-sync window went unnoticed.
+    let Some(buf) = wq.effects_buffer else {
+        redis_module::logging::log_warning(format!(
+            "graph '{key_name}' was modified but produced no effects payload; \
+             the change will not reach replicas or the AOF"
+        ));
+        return;
+    };
+    // Sent while the GIL is held. Handed over whole, unread and untouched: this
+    // is the last moment a payload can go out — every commit has run and the
+    // index DDL is in — and that timing is the only thing this module knows
+    // about it. What the bytes are, and what still has to happen to them, is
+    // the format's.
+    EffectsPayload::replicate(&CtxSink(ctx), key_name.as_bytes(), buf);
 }
 
 pub fn process_write_queued_query(graph: &Arc<RwLock<ThreadedGraph>>) {
@@ -1630,28 +1637,6 @@ pub fn process_write_queued_query(graph: &Arc<RwLock<ThreadedGraph>>) {
             }
         }
     }
-}
-
-/// Send replication: `GRAPH.EFFECT` with the binary buffer.
-///
-/// There is no query-replay alternative. A write either ships as effects or is
-/// not replicated at all, so a replica's state is only ever built from effects
-/// or from a native Redis sync — never from re-executing a query, which is the
-/// one path where the two engines could reach different answers from the same
-/// input.
-fn replicate_effects(
-    ctx: &Context,
-    key_name: &Arc<str>,
-    effects_buffer: Option<Vec<u8>>,
-) {
-    let Some(buf) = effects_buffer else {
-        return;
-    };
-    // Handed over whole, unread and untouched. This is the last moment a
-    // payload can be sent — every commit has run and the index DDL is in — and
-    // that timing is the only thing this module knows about it. What the bytes
-    // are, and what still has to happen to them, is the format's.
-    EffectsPayload::replicate(&CtxSink(ctx), key_name.as_bytes(), buf);
 }
 
 /// `RM_Replicate`, as the [`ReplicationSink`] the format sends through.
