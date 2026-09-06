@@ -890,6 +890,48 @@ mod tests {
     }
 
     #[test]
+    fn a_descending_endpoint_column_survives_a_record() {
+        // The shape the descending segments exist for. `src` and `dst` follow
+        // *edge* id order, so an endpoint column written by a downward scan
+        // descends while the edge ids ascend — three directions in one record,
+        // and every row has to come back on the entity it went out with.
+        let ids = IdList::from([100_u64, 101, 102, 103]);
+        let src = IdList::from([50_u64, 49, 48, 47]);
+        let dst = IdList::from([9_u64, 9, 9, 9]);
+        let mut buf = new_buffer();
+        Record::CreateEdge {
+            ids: ids.clone(),
+            relation_id: 2,
+            src: src.clone(),
+            dst: dst.clone(),
+            attr_ids: vec![0],
+            rows: vec![Value::Int(1), Value::Int(2), Value::Int(3), Value::Int(4)],
+        }
+        .encode(&mut buf);
+
+        let records = read_buffer(&buf).unwrap();
+        let Record::CreateEdge {
+            ids: gi,
+            src: gs,
+            dst: gd,
+            rows,
+            ..
+        } = &records[0]
+        else {
+            panic!("wrong record: {:?}", records[0]);
+        };
+        assert_eq!(gi.iter().collect::<Vec<_>>(), vec![100, 101, 102, 103]);
+        assert_eq!(
+            gs.iter().collect::<Vec<_>>(),
+            vec![50, 49, 48, 47],
+            "the descending column must come back descending, not sorted"
+        );
+        assert_eq!(gd.iter().collect::<Vec<_>>(), vec![9, 9, 9, 9]);
+        assert_eq!(rows[0], Value::Int(1), "row 0 still belongs to edge 100");
+        assert_eq!(rows[3], Value::Int(4), "row 3 still belongs to edge 103");
+    }
+
+    #[test]
     fn create_edge_keeps_endpoints_aligned_with_their_edges() {
         // Three edges out of one source: an IdSet would have collapsed the
         // sources to one entry and misaligned every row after the first.

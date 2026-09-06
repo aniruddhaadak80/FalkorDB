@@ -1442,13 +1442,40 @@ mod tests {
 
     #[test]
     fn truncation_is_an_error_not_a_panic() {
-        let ids: Vec<u64> = (0..10).map(|i| i * 3).collect();
-        let mut buf = Vec::new();
-        IdList::from(ids.as_slice()).encode(&mut buf);
-        for cut in 0..buf.len() {
-            let mut r = Reader::new(&buf[..cut]);
-            assert!(read_ids(&mut r, 10).is_err(), "cut at {cut}");
+        // Both directions and both segment kinds: a descending bitmap has a
+        // length-prefixed blob, which is the shape a truncation can lie about.
+        let up: Vec<u64> = (0..10).map(|i| i * 3).collect();
+        let down: Vec<u64> = up.iter().rev().copied().collect();
+        let flat: Vec<u64> = (0..10).rev().collect();
+        for ids in [&up, &down, &flat] {
+            let mut buf = Vec::new();
+            IdList::from(ids.as_slice()).encode(&mut buf);
+            for cut in 0..buf.len() {
+                let mut r = Reader::new(&buf[..cut]);
+                assert!(read_ids(&mut r, 10).is_err(), "cut at {cut} of {ids:?}");
+            }
         }
+    }
+
+    #[test]
+    fn a_descending_range_pins_its_bytes() {
+        // The wire contract C has to match. Header is kind 0 with the
+        // descending bit, both widths one byte; then the base — which is the
+        // *highest* id, unlike the ascending form — and the count.
+        let mut buf = Vec::new();
+        IdList::from([9_u64, 8, 7, 6].as_slice()).encode(&mut buf);
+        assert_eq!(
+            buf,
+            vec![
+                1,
+                0,
+                0,
+                0,           // one segment
+                0b0100_0000, // kind 0 (Range) | descending, widths 1 and 1
+                9,           // base: the first id, and the highest
+                4,           // count
+            ]
+        );
     }
 
     #[test]
