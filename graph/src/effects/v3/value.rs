@@ -11,7 +11,7 @@ use crate::runtime::{
 
 use crate::graph::graphblas::serialization::si_type;
 
-use super::{DecodeError, EffectDecode, EffectEncode, EffectWrite, Reader, T_MAP, write_tag};
+use super::{DecodeError, EffectDecode, EffectEncode, EffectWrite, Reader};
 
 // ── SIValue ──
 
@@ -33,17 +33,17 @@ impl EffectEncode<3> for Value {
         buf: &mut W,
     ) {
         match self {
-            Value::Null => write_tag(buf, si_type::T_NULL),
+            Value::Null => buf.u32(si_type::T_NULL),
             Value::Bool(b) => {
-                write_tag(buf, si_type::T_BOOL);
+                buf.u32(si_type::T_BOOL);
                 buf.u8(u8::from(*b));
             }
             Value::Int(i) => {
-                write_tag(buf, si_type::T_INT64);
+                buf.u32(si_type::T_INT64);
                 buf.i64(*i);
             }
             Value::Float(f) => {
-                write_tag(buf, si_type::T_DOUBLE);
+                buf.u32(si_type::T_DOUBLE);
                 buf.f64(*f);
             }
             Value::String(s) => {
@@ -58,11 +58,11 @@ impl EffectEncode<3> for Value {
                 } else {
                     si_type::T_STRING
                 };
-                write_tag(buf, tag);
+                buf.u32(tag);
                 buf.string(s);
             }
             Value::List(items) => {
-                write_tag(buf, si_type::T_ARRAY);
+                buf.u32(si_type::T_ARRAY);
                 // u32, not u64: C reads the count as `uint32`.
                 buf.u32(items.len() as u32);
                 // Floor: every element is at least its own type tag.
@@ -72,7 +72,7 @@ impl EffectEncode<3> for Value {
                 }
             }
             Value::Map(m) => {
-                write_tag(buf, T_MAP);
+                buf.u32(si_type::T_MAP);
                 buf.u32(m.len() as u32);
                 // Floor: an 8-byte key length plus the value's type tag.
                 buf.reserve(m.len() * 12);
@@ -84,14 +84,14 @@ impl EffectEncode<3> for Value {
                 }
             }
             Value::Point(p) => {
-                write_tag(buf, si_type::T_POINT);
+                buf.u32(si_type::T_POINT);
                 // 2 x f32. Rust's own format used f64 here, which silently doubles
                 // the payload and desyncs everything after it.
                 buf.bytes(&p.latitude.to_le_bytes());
                 buf.bytes(&p.longitude.to_le_bytes());
             }
             Value::VecF32(v) => {
-                write_tag(buf, si_type::T_VECTOR_F32);
+                buf.u32(si_type::T_VECTOR_F32);
                 // Exact: count then a fixed 4 bytes per element.
                 buf.reserve(4 + v.len() * 4);
                 buf.u32(v.len() as u32);
@@ -100,19 +100,19 @@ impl EffectEncode<3> for Value {
                 }
             }
             Value::Datetime(ts) => {
-                write_tag(buf, si_type::T_DATETIME);
+                buf.u32(si_type::T_DATETIME);
                 buf.i64(*ts);
             }
             Value::Date(ts) => {
-                write_tag(buf, si_type::T_DATE);
+                buf.u32(si_type::T_DATE);
                 buf.i64(*ts);
             }
             Value::Time(ts) => {
-                write_tag(buf, si_type::T_TIME);
+                buf.u32(si_type::T_TIME);
                 buf.i64(*ts);
             }
             Value::Duration(d) => {
-                write_tag(buf, si_type::T_DURATION);
+                buf.u32(si_type::T_DURATION);
                 buf.i64(*d);
             }
             // Nodes, edges and paths are never property values, so they cannot reach
@@ -218,10 +218,7 @@ fn read_one(
     r: &mut Reader<'_>,
     stack: &mut Vec<Frame>,
 ) -> Result<Option<Value>, DecodeError> {
-    // Widened so the arms can name `si_type`'s own constants: they are `u64`
-    // there, and a pattern has to be a named constant, not a narrowing
-    // expression.
-    let t = u64::from(r.u32()?);
+    let t = r.u32()?;
     let v = match t {
         si_type::T_NULL => Value::Null,
         si_type::T_BOOL => Value::Bool(r.u8()? != 0),
@@ -251,7 +248,7 @@ fn read_one(
             });
             return Ok(None);
         }
-        T_MAP => {
+        si_type::T_MAP => {
             let n = r.u32()?;
             // Each pair is at least an 8-byte length plus a 4-byte type tag.
             let n = r.guard_count(u64::from(n), 12)?;

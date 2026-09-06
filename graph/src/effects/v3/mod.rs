@@ -254,11 +254,11 @@ pub const fn update_opcode(entity: EntityType) -> Opcode {
 // rather than having a discriminant of its own. A bit set is the one shape an
 // enum genuinely cannot model, so these stay constants.
 
-pub const INDEX_FLD_FULLTEXT: u32 = narrow_flag(index_field_type::INDEX_FLD_FULLTEXT);
-pub const INDEX_FLD_NUMERIC: u32 = narrow_flag(index_field_type::INDEX_FLD_NUMERIC);
-pub const INDEX_FLD_GEO: u32 = narrow_flag(index_field_type::INDEX_FLD_GEO);
-pub const INDEX_FLD_STR: u32 = narrow_flag(index_field_type::INDEX_FLD_STR);
-pub const INDEX_FLD_VECTOR: u32 = narrow_flag(index_field_type::INDEX_FLD_VECTOR);
+pub use index_field_type::INDEX_FLD_FULLTEXT;
+pub use index_field_type::INDEX_FLD_GEO;
+pub use index_field_type::INDEX_FLD_NUMERIC;
+pub use index_field_type::INDEX_FLD_STR;
+pub use index_field_type::INDEX_FLD_VECTOR;
 
 pub const INDEX_FLD_UNKNOWN: u32 = 0x00;
 /// `INDEX_FLD_NUMERIC | INDEX_FLD_GEO | INDEX_FLD_STR` = `0x0E`.
@@ -317,45 +317,9 @@ pub const fn constraint_from_tag(v: u32) -> Result<ConstraintType, DecodeError> 
 // Derived from `serialization::si_type` rather than restated: the RDB encoder
 // already carries C's tags, and two copies of a bitmask would drift silently —
 // nothing fails when a tag is wrong, the far side just reads the next field as
-// a type. They are `u64` there because RDB writes them through
-// `write_unsigned`, which emits a type byte plus a fixed 8-byte LE value; the
-// effects wire is a bare 4 bytes, so these narrow.
-//
-// C's `SIType` is a **bitmask**, not an ordinal: each type is a distinct bit.
-// Rust's own v2 codec used sequential 0..12 tags, which collide with these
-// almost everywhere and are the single most dangerous divergence in the format.
-
-/// Narrow a C flag constant to the `u32` the wire and the index API use.
-const fn narrow_flag(v: u64) -> u32 {
-    assert!(
-        v <= u32::MAX as u64,
-        "a C constant must fit the 4 bytes the wire reads"
-    );
-    v as u32
-}
-
-/// Write a C type constant as the four bytes the effects wire carries it in.
-///
-/// `serialization` holds these as `u64` because RDB writes them through
-/// `write_unsigned`; the effects wire is a bare `u32`. Going through one
-/// narrowing writer means the tags are never aliased into this module at all —
-/// each one is named once, at its definition in `si_type`, so there is no second
-/// copy to drift. The assertion is what stands between a wider C constant and a
-/// silently truncated tag.
-pub fn write_tag<W: EffectWrite + ?Sized>(
-    buf: &mut W,
-    v: u64,
-) {
-    buf.u32(u32::try_from(v).expect("a C constant must fit the 4 bytes the wire reads"));
-}
-
-/// `T_MAP` has no RDB counterpart — the RDB path never stores a bare map — so
-/// unlike the rest it is stated here.
-///
-/// `u64` like `si_type`'s own constants, so encode and decode treat it exactly
-/// as they treat the derived ones — and so it can be a `match` pattern beside
-/// them without a second, differently-typed copy.
-pub const T_MAP: u64 = 1 << 0;
+// a type — re-exported, not restated, so there is no second copy to drift. They
+// are `u32` at their definition, which is the width C declares and the width
+// this wire carries, so nothing narrows on the way here.
 
 // ── payload header ──
 
