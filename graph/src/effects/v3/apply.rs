@@ -23,7 +23,7 @@ use crate::{
         AttrRef, INDEX_FLD_FULLTEXT, INDEX_FLD_VECTOR, Record, entity_tag, open_payload,
     },
     entity_type::EntityType,
-    graph::graph::{Graph, TypeId},
+    graph::graph::{Graph, NodeOpError, TypeId},
     index::{IndexType, indexer::IndexOptions},
     runtime::{pending::IndexDocs, runtime::map_to_index_options, value::Value},
 };
@@ -100,6 +100,26 @@ pub fn apply_effects(
     Ok(())
 }
 
+/// A refusal from a bulk node operation, as the divergence it is.
+fn node_op(
+    e: NodeOpError,
+    ops: &IndexOps,
+    bin: u64,
+) -> ApplyError {
+    match e {
+        NodeOpError::AlreadyLive(id) => ApplyError::NodeAlreadyLive {
+            id,
+            bin,
+            first_unallocated: ops.entry_unallocated,
+        },
+        NodeOpError::AlreadyRecycled(id) => ApplyError::NodeNotLive {
+            id,
+            reason: "it is already in the recycle bin",
+        },
+        NodeOpError::Graph(e) => ApplyError::Graph(e),
+    }
+}
+
 fn apply_record(
     g: &mut Graph,
     record: Record,
@@ -149,9 +169,22 @@ fn apply_record(
             rows,
         } => {
             let nodes = ids.to_roaring();
-            verify_creatable(g, &nodes, ops)?;
+            // Only what the graph cannot know: an id this *buffer* already
+            // claimed. It is live in the graph by now, but the mark below is
+            // frozen at buffer entry and so cannot see it.
+            if let Some(twice) = (&nodes & &ops.created_here).min() {
+                return Err(ApplyError::NodeAlreadyLive {
+                    id: twice,
+                    bin: g.deleted_nodes_count(),
+                    first_unallocated: ops.entry_unallocated,
+                });
+            }
             g.add_reserved_node_count(ids.len() as u64);
-            g.create_nodes(&nodes);
+            // The graph refuses rather than double-counting, so there is no
+            // separate check here to keep in step with it.
+            let bin = g.deleted_nodes_count();
+            g.create_nodes(&nodes, ops.entry_unallocated)
+                .map_err(|e| node_op(e, ops, bin))?;
             ops.created_here |= &nodes;
 
             // The graph's bulk APIs take `&[u64]`, so the ids are materialized
@@ -283,8 +316,22 @@ fn apply_record(
             // `Vec<u64>` first, and a delete-by-label arrives as a consecutive
             // range — the one shape that has no vector to hand over.
             let nodes = ids.to_roaring();
-            verify_deletable(g, &nodes, ops)?;
-            g.delete_nodes(&nodes, &mut ops.docs.node_removes)?;
+            // Only what the graph cannot know: at or above the mark frozen at
+            // buffer entry and not created by this buffer means it was never
+            // allocated here at all. The second half matters because a buffer
+            // may legitimately create a node and then delete it.
+            if let Some(id) = (&nodes - &ops.created_here)
+                .max()
+                .filter(|&id| id >= ops.entry_unallocated)
+            {
+                return Err(ApplyError::NodeNotLive {
+                    id,
+                    reason: "it was never allocated here",
+                });
+            }
+            let bin = g.deleted_nodes_count();
+            g.delete_nodes(&nodes, &mut ops.docs.node_removes)
+                .map_err(|e| node_op(e, ops, bin))?;
             // Deleting releases the id back to the bin, so a *later* record in
             // this same buffer may legitimately create it again: a multi-commit
             // query (`CREATE (n) WITH n DELETE n WITH 1 AS z CREATE ()`) commits
@@ -404,70 +451,6 @@ fn apply_add_schema(
             verify_id("relationship type", name, i64::from(id), assigned, local)
         }
     }
-}
-
-/// The check v2 could not make.
-/// Every id a `CREATE_NODE` names must be one this replica could legitimately
-/// hand out: recycled, or past the first id it has never allocated. Anything else is already
-/// live, and creating it would double-count `node_count` and shift every
-/// subsequent fresh id.
-///
-/// Two roaring operations for the whole record, not a probe per id: the ids not
-/// in the bin are a set difference, and because that difference is sorted only
-/// its minimum has to clear the mark.
-fn verify_creatable(
-    g: &Graph,
-    nodes: &RoaringTreemap,
-    ops: &IndexOps,
-) -> Result<(), ApplyError> {
-    // Not in the bin means it was never freed; below the entry mark means it
-    // was already handed out. Both together mean it is live here, and creating
-    // it would double-count `node_count` and shift every later fresh id.
-    if let Some(lowest) = g.first_uncreatable_node(nodes, ops.entry_unallocated) {
-        return Err(ApplyError::NodeAlreadyLive {
-            id: lowest,
-            bin: g.deleted_nodes_count(),
-            first_unallocated: ops.entry_unallocated,
-        });
-    }
-    // Two records in one buffer claiming the same id is divergence too, and the
-    // mark cannot see it because neither id was live on entry.
-    if let Some(twice) = (nodes & &ops.created_here).min() {
-        return Err(ApplyError::NodeAlreadyLive {
-            id: twice,
-            bin: g.deleted_nodes_count(),
-            first_unallocated: ops.entry_unallocated,
-        });
-    }
-    Ok(())
-}
-
-/// Every id a `DELETE_NODE` names must currently be live: not already in the
-/// recycle bin, and below the first id this graph has never allocated.
-fn verify_deletable(
-    g: &Graph,
-    nodes: &RoaringTreemap,
-    ops: &IndexOps,
-) -> Result<(), ApplyError> {
-    if let Some(id) = g.first_recycled_node(nodes) {
-        return Err(ApplyError::NodeNotLive {
-            id,
-            reason: "it is already in the recycle bin",
-        });
-    }
-    // At or above the entry mark and not created by this buffer means it was
-    // never allocated here at all. The second half matters: a buffer may legitimately
-    // create a node and then delete it.
-    if let Some(id) = (nodes - &ops.created_here)
-        .max()
-        .filter(|&id| id >= ops.entry_unallocated)
-    {
-        return Err(ApplyError::NodeNotLive {
-            id,
-            reason: "it was never allocated here",
-        });
-    }
-    Ok(())
 }
 
 fn verify_id(

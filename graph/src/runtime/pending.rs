@@ -973,7 +973,12 @@ impl Pending {
     ) -> Result<(), String> {
         if !self.created_nodes.is_empty() {
             stats.borrow_mut().nodes_created += self.created_nodes.len();
-            g.borrow_mut().create_nodes(&self.created_nodes);
+            let mut g = g.borrow_mut();
+            // The allocator handed these out, so none of them can be live;
+            // the graph's own mark is the right one here.
+            let mark = g.first_unallocated_node_id();
+            g.create_nodes(&self.created_nodes, mark)
+                .map_err(|e| e.to_string())?;
         }
         if !self.created_rel_types.is_empty() {
             stats.borrow_mut().relationships_created += self.created_rel_types.len();
@@ -1057,7 +1062,8 @@ impl Pending {
             stats.borrow_mut().nodes_deleted += self.deleted_nodes.len();
             self.deleted_node_labels = g
                 .borrow_mut()
-                .delete_nodes(&self.deleted_nodes, &mut self.index_docs.node_removes)?;
+                .delete_nodes(&self.deleted_nodes, &mut self.index_docs.node_removes)
+                .map_err(|e| e.to_string())?;
         }
         // Take relationship deletions BEFORE implicit edge processing
         // so we can pass them to delete_implicit_edges for dedup.

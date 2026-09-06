@@ -411,7 +411,9 @@ fn process_node_token(
         return Ok(());
     }
 
-    g.create_nodes(&nodes_bitmap);
+    let mark = g.first_unallocated_node_id();
+    g.create_nodes(&nodes_bitmap, mark)
+        .map_err(|e| e.to_string())?;
     unsafe { maybe_yield(raw_ctx) };
 
     g.set_nodes_labels_bulk(&label_rows, &label_cols, &mut docs.nodes, true);

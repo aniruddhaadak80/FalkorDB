@@ -77,7 +77,10 @@ pub(crate) fn live_node(
     // `create_nodes` consumes a reservation, exactly as the apply path does
     // before it — without this the counter underflows.
     graph.inc_reserved_node_count();
-    graph.create_nodes(&ids);
+    let mark = graph.first_unallocated_node_id();
+    graph
+        .create_nodes(&ids, mark)
+        .expect("a fresh id must create");
     let mut rows = Vec::new();
     let mut cols = Vec::new();
     for name in labels {

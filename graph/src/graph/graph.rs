@@ -277,6 +277,41 @@ pub struct DeletedEdge {
     pub dst: NodeId,
 }
 
+/// Why a bulk node operation refused.
+///
+/// Typed rather than a `String` because the effects apply path renders these
+/// into a divergence report an operator reads, and "which id, and which of the
+/// two ways it was wrong" is the whole content of that report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NodeOpError {
+    /// Already handed out and not freed, so creating it would double-count
+    /// `node_count` and shift every later fresh id.
+    AlreadyLive(u64),
+    /// Already in the recycle bin, so it is not live to delete.
+    AlreadyRecycled(u64),
+    /// Anything the graph itself reported while doing the work.
+    Graph(String),
+}
+
+impl std::fmt::Display for NodeOpError {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        match self {
+            Self::AlreadyLive(id) => write!(f, "node {id} is already live"),
+            Self::AlreadyRecycled(id) => write!(f, "node {id} is already in the recycle bin"),
+            Self::Graph(e) => f.write_str(e),
+        }
+    }
+}
+
+impl From<String> for NodeOpError {
+    fn from(e: String) -> Self {
+        Self::Graph(e)
+    }
+}
+
 pub struct Graph {
     /// Graph name (Redis key name)
     name: String,
@@ -1449,10 +1484,57 @@ impl Graph {
         Ok(ids)
     }
 
+    /// Delete every node in `nodes`, or refuse and change nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`NodeOpError::AlreadyRecycled`] for the lowest id already in the bin —
+    /// the half of "is this node live" only the bin can answer. The other half,
+    /// whether an id was ever allocated *here*, needs a mark frozen before the
+    /// caller's batch plus the ids that batch has itself created, and neither
+    /// is something this graph has a concept of; `apply_effects` keeps that.
+    ///
+    /// Refusing rather than proceeding, because the body subtracts from
+    /// `node_count` unconditionally and a delete of an already-freed id
+    /// underflowed it.
+    fn refuse_undeletable(
+        &self,
+        nodes: &RoaringTreemap,
+    ) -> Result<(), NodeOpError> {
+        match (nodes & &self.deleted_nodes).min() {
+            Some(id) => Err(NodeOpError::AlreadyRecycled(id)),
+            None => Ok(()),
+        }
+    }
+
+    /// Create every node in `nodes`, or refuse and change nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`NodeOpError::AlreadyLive`] for the lowest id it cannot create — one
+    /// already handed out and not freed. Refusing is the point: the body below adds to `node_count` and
+    /// subtracts from `reserved_node_count` unconditionally, so an already-live
+    /// id used to double-count silently and shift every later fresh id. A
+    /// caller cannot forget the check when the operation itself is the check.
+    ///
+    /// `first_unallocated` is the caller's rather than [`Self::first_unallocated_node_id`],
+    /// and it has to be: records inside one effects buffer are grouped by shape
+    /// rather than ordered by id, so a create of 500..600 may precede one of
+    /// 0..500. Judged against this graph's *live* mark, the second of those is
+    /// rejected — the mark has already advanced to 100 — even though the buffer
+    /// is legitimate. `apply_effects` freezes the mark at buffer entry for that
+    /// reason and passes it here.
     pub fn create_nodes(
         &mut self,
         nodes: &RoaringTreemap,
-    ) {
+        first_unallocated: u64,
+    ) -> Result<(), NodeOpError> {
+        if let Some(live) = (nodes - &self.deleted_nodes)
+            .min()
+            .filter(|&id| id < first_unallocated)
+        {
+            return Err(NodeOpError::AlreadyLive(live));
+        }
         self.node_count += nodes.len();
         self.reserved_node_count -= nodes.len();
         self.deleted_nodes -= nodes;
@@ -1468,6 +1550,7 @@ impl Graph {
         }
 
         self.resize();
+        Ok(())
     }
 
     #[must_use]
@@ -1951,7 +2034,8 @@ impl Graph {
         &mut self,
         deleted_nodes: &RoaringTreemap,
         remove_docs: &mut FxHashMap<u64, RoaringTreemap>,
-    ) -> Result<Vec<DeletedNodeLabel>, String> {
+    ) -> Result<Vec<DeletedNodeLabel>, NodeOpError> {
+        self.refuse_undeletable(deleted_nodes)?;
         self.deleted_nodes |= deleted_nodes;
         self.node_count -= deleted_nodes.len();
 
@@ -2524,46 +2608,6 @@ impl Graph {
     #[must_use]
     pub fn first_unallocated_node_id(&self) -> u64 {
         self.node_count + self.deleted_nodes.len()
-    }
-
-    /// The lowest id in `nodes` this graph cannot create — one it has already
-    /// handed out and not freed — or `None` when every one of them is
-    /// available.
-    ///
-    /// Available means in the recycle bin *or* never allocated, and the caller
-    /// gets the answer rather than the bin. Handing out the set of
-    /// not-yet-recycled ids let a caller assemble that judgement itself, and
-    /// there is only one right way to assemble it.
-    ///
-    /// `first_unallocated` is the caller's, not this graph's current one:
-    /// `apply_effects` freezes it at buffer entry because records within a
-    /// buffer are not in id order — a create of 500..600 may precede 0..500 —
-    /// so mid-buffer `node_count` is a count rather than a bound.
-    ///
-    /// Two roaring operations for the whole set rather than a probe per id.
-    #[must_use]
-    pub fn first_uncreatable_node(
-        &self,
-        nodes: &RoaringTreemap,
-        first_unallocated: u64,
-    ) -> Option<u64> {
-        (nodes - &self.deleted_nodes)
-            .min()
-            .filter(|&id| id < first_unallocated)
-    }
-
-    /// The lowest id in `nodes` that is already in the recycle bin, or `None`
-    /// when none of them is.
-    ///
-    /// The half of "is this node live" that only the bin can answer; the other
-    /// half is the comparison against the first unallocated id, which is the
-    /// caller's because that boundary is.
-    #[must_use]
-    pub fn first_recycled_node(
-        &self,
-        nodes: &RoaringTreemap,
-    ) -> Option<u64> {
-        (nodes & &self.deleted_nodes).min()
     }
 
     #[must_use]
