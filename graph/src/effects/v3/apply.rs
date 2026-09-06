@@ -717,12 +717,9 @@ const _: () = assert!(entity_tag(EntityType::Relationship) == 2);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::effects::v3::ConstraintSpec;
+    use crate::effects::EffectEncode;
     use crate::effects::v3::staging::StagePending;
-    use crate::effects::v3::{
-        AttrRef, INDEX_FLD_RANGE, IdList, new_buffer, write_add_attribute, write_add_schema,
-        write_constraint, write_create_index, write_create_node, write_labels, write_update,
-    };
+    use crate::effects::v3::{AttrRef, INDEX_FLD_RANGE, IdList, Record, new_buffer};
     use crate::graph::constraint::{ConstraintStatus, ConstraintType};
 
     fn graph() -> Graph {
@@ -736,7 +733,11 @@ mod tests {
         ids: &IdList,
         labels: &[u32],
     ) {
-        crate::effects::v3::write_delete_node(buf, ids, labels);
+        Record::DeleteNode {
+            ids: ids.clone(),
+            labels: labels.to_vec(),
+        }
+        .encode(buf);
     }
 
     #[test]
@@ -745,7 +746,13 @@ mod tests {
         // the bin here too, and it is free to come back.
         let mut g = graph();
         let mut buf = new_buffer();
-        write_create_node(&mut buf, &IdList::from([0, 1, 2]), &[], &[], &[]);
+        Record::CreateNode {
+            ids: IdList::from([0, 1, 2]),
+            labels: vec![],
+            attr_ids: vec![],
+            rows: vec![],
+        }
+        .encode(&mut buf);
         apply_effects(&mut g, &buf).expect("create must apply");
 
         let mut buf = new_buffer();
@@ -753,7 +760,13 @@ mod tests {
         apply_effects(&mut g, &buf).expect("delete must apply");
 
         let mut buf = new_buffer();
-        write_create_node(&mut buf, &IdList::from([1]), &[], &[], &[]);
+        Record::CreateNode {
+            ids: IdList::from([1]),
+            labels: vec![],
+            attr_ids: vec![],
+            rows: vec![],
+        }
+        .encode(&mut buf);
         apply_effects(&mut g, &buf).expect("recreating a recycled id must apply");
         assert_eq!(g.node_count(), 3);
     }
@@ -764,11 +777,23 @@ mod tests {
         // last allocated id without anything being wrong.
         let mut g = graph();
         let mut buf = new_buffer();
-        write_create_node(&mut buf, &IdList::from([0, 1]), &[], &[], &[]);
+        Record::CreateNode {
+            ids: IdList::from([0, 1]),
+            labels: vec![],
+            attr_ids: vec![],
+            rows: vec![],
+        }
+        .encode(&mut buf);
         apply_effects(&mut g, &buf).expect("create must apply");
 
         let mut buf = new_buffer();
-        write_create_node(&mut buf, &IdList::from([2, 3]), &[], &[], &[]);
+        Record::CreateNode {
+            ids: IdList::from([2, 3]),
+            labels: vec![],
+            attr_ids: vec![],
+            rows: vec![],
+        }
+        .encode(&mut buf);
         apply_effects(&mut g, &buf).expect("fresh ids must apply");
         assert_eq!(g.node_count(), 4);
     }
@@ -780,11 +805,23 @@ mod tests {
         // and every later fresh id is off by one.
         let mut g = graph();
         let mut buf = new_buffer();
-        write_create_node(&mut buf, &IdList::from([0, 1, 2]), &[], &[], &[]);
+        Record::CreateNode {
+            ids: IdList::from([0, 1, 2]),
+            labels: vec![],
+            attr_ids: vec![],
+            rows: vec![],
+        }
+        .encode(&mut buf);
         apply_effects(&mut g, &buf).expect("create must apply");
 
         let mut buf = new_buffer();
-        write_create_node(&mut buf, &IdList::from([1]), &[], &[], &[]);
+        Record::CreateNode {
+            ids: IdList::from([1]),
+            labels: vec![],
+            attr_ids: vec![],
+            rows: vec![],
+        }
+        .encode(&mut buf);
         let err = apply_effects(&mut g, &buf).expect_err("must refuse");
         assert!(
             matches!(err, ApplyError::NodeAlreadyLive { id: 1, .. }),
@@ -799,8 +836,20 @@ mod tests {
         // cannot see this. It is still divergence.
         let mut g = graph();
         let mut buf = new_buffer();
-        write_create_node(&mut buf, &IdList::from([0, 1]), &[], &[], &[]);
-        write_create_node(&mut buf, &IdList::from([1, 2]), &[], &[], &[]);
+        Record::CreateNode {
+            ids: IdList::from([0, 1]),
+            labels: vec![],
+            attr_ids: vec![],
+            rows: vec![],
+        }
+        .encode(&mut buf);
+        Record::CreateNode {
+            ids: IdList::from([1, 2]),
+            labels: vec![],
+            attr_ids: vec![],
+            rows: vec![],
+        }
+        .encode(&mut buf);
         let err = apply_effects(&mut g, &buf).expect_err("must refuse");
         assert!(
             matches!(err, ApplyError::NodeAlreadyLive { id: 1, .. }),
@@ -814,7 +863,13 @@ mod tests {
         // past the entry mark, so it looks never-allocated to the delete check.
         let mut g = graph();
         let mut buf = new_buffer();
-        write_create_node(&mut buf, &IdList::from([0, 1]), &[], &[], &[]);
+        Record::CreateNode {
+            ids: IdList::from([0, 1]),
+            labels: vec![],
+            attr_ids: vec![],
+            rows: vec![],
+        }
+        .encode(&mut buf);
         write_delete(&mut buf, &IdList::from([1]), &[]);
         apply_effects(&mut g, &buf).expect("create-then-delete must apply");
         assert_eq!(g.node_count(), 1);
@@ -824,7 +879,13 @@ mod tests {
     fn deleting_an_already_recycled_id_aborts_the_buffer() {
         let mut g = graph();
         let mut buf = new_buffer();
-        write_create_node(&mut buf, &IdList::from([0, 1]), &[], &[], &[]);
+        Record::CreateNode {
+            ids: IdList::from([0, 1]),
+            labels: vec![],
+            attr_ids: vec![],
+            rows: vec![],
+        }
+        .encode(&mut buf);
         apply_effects(&mut g, &buf).expect("create must apply");
 
         let mut buf = new_buffer();
@@ -844,7 +905,13 @@ mod tests {
     fn deleting_a_never_allocated_id_aborts_the_buffer() {
         let mut g = graph();
         let mut buf = new_buffer();
-        write_create_node(&mut buf, &IdList::from([0, 1]), &[], &[], &[]);
+        Record::CreateNode {
+            ids: IdList::from([0, 1]),
+            labels: vec![],
+            attr_ids: vec![],
+            rows: vec![],
+        }
+        .encode(&mut buf);
         apply_effects(&mut g, &buf).expect("create must apply");
 
         let mut buf = new_buffer();
@@ -865,16 +932,29 @@ mod tests {
         // only healed on the next resync.
         let mut g = graph();
         let mut buf = new_buffer();
-        write_add_schema(&mut buf, EntityType::Node, 0, "L");
-        write_add_attribute(&mut buf, 0, "keep");
-        write_add_attribute(&mut buf, 1, "drop");
-        write_create_node(
-            &mut buf,
-            &IdList::from([0, 1]),
-            &[0],
-            &[0, 1],
-            &[Value::Int(1), Value::Int(10), Value::Int(2), Value::Int(20)],
-        );
+        Record::AddSchema {
+            schema_type: EntityType::Node,
+            id: 0,
+            name: "L".to_owned(),
+        }
+        .encode(&mut buf);
+        Record::AddAttribute {
+            id: 0,
+            name: "keep".to_owned(),
+        }
+        .encode(&mut buf);
+        Record::AddAttribute {
+            id: 1,
+            name: "drop".to_owned(),
+        }
+        .encode(&mut buf);
+        Record::CreateNode {
+            ids: IdList::from([0, 1]),
+            labels: vec![0],
+            attr_ids: vec![0, 1],
+            rows: vec![Value::Int(1), Value::Int(10), Value::Int(2), Value::Int(20)],
+        }
+        .encode(&mut buf);
         apply_effects(&mut g, &buf).expect("create must apply");
         assert_eq!(
             g.get_node_attribute(0.into(), &Arc::new("drop".into())),
@@ -883,15 +963,15 @@ mod tests {
 
         // Now null it out, as an UPDATE_NODE would.
         let mut buf = new_buffer();
-        crate::effects::v3::write_update(
-            &mut buf,
-            EntityType::Node,
-            &IdList::from([0, 1]),
-            &[0],
-            None,
-            &[1],
-            &[Value::Null, Value::Null],
-        );
+        crate::effects::v3::Record::Update {
+            entity: EntityType::Node,
+            ids: IdList::from([0, 1]),
+            labels: vec![0],
+            relation_id: None,
+            attr_ids: vec![1],
+            rows: vec![Value::Null, Value::Null],
+        }
+        .encode(&mut buf);
         apply_effects(&mut g, &buf).expect("update must apply");
 
         assert_eq!(
@@ -917,14 +997,35 @@ mod tests {
         let mut g = graph();
 
         let mut buf = new_buffer();
-        write_add_schema(&mut buf, EntityType::Node, 0, "A");
-        write_create_node(&mut buf, &IdList::from([0, 1, 2]), &[0], &[], &[]);
+        Record::AddSchema {
+            schema_type: EntityType::Node,
+            id: 0,
+            name: "A".to_owned(),
+        }
+        .encode(&mut buf);
+        Record::CreateNode {
+            ids: IdList::from([0, 1, 2]),
+            labels: vec![0],
+            attr_ids: vec![],
+            rows: vec![],
+        }
+        .encode(&mut buf);
         apply_effects(&mut g, &buf).expect("first buffer must apply");
 
         // A second buffer introducing a label and immediately applying it.
         let mut buf = new_buffer();
-        write_add_schema(&mut buf, EntityType::Node, 1, "B");
-        write_labels(&mut buf, true, &IdList::from([0, 1, 2]), &[1]);
+        Record::AddSchema {
+            schema_type: EntityType::Node,
+            id: 1,
+            name: "B".to_owned(),
+        }
+        .encode(&mut buf);
+        Record::Labels {
+            add: true,
+            ids: IdList::from([0, 1, 2]),
+            labels: vec![1],
+        }
+        .encode(&mut buf);
         apply_effects(&mut g, &buf).expect("labelling with a fresh label must apply");
 
         assert_eq!(g.get_labels().len(), 2);
@@ -944,7 +1045,13 @@ mod tests {
         // still get this right.
         let mut g = graph();
         let mut buf = new_buffer();
-        write_create_node(&mut buf, &IdList::from([0, 1, 2]), &[], &[], &[]);
+        Record::CreateNode {
+            ids: IdList::from([0, 1, 2]),
+            labels: vec![],
+            attr_ids: vec![],
+            rows: vec![],
+        }
+        .encode(&mut buf);
         apply_effects(&mut g, &buf).expect("create must apply");
 
         let mut buf = new_buffer();
@@ -954,12 +1061,24 @@ mod tests {
 
         // Recycled: every id is in the bin, so all three may come back.
         let mut buf = new_buffer();
-        write_create_node(&mut buf, &IdList::from([1]), &[], &[], &[]);
+        Record::CreateNode {
+            ids: IdList::from([1]),
+            labels: vec![],
+            attr_ids: vec![],
+            rows: vec![],
+        }
+        .encode(&mut buf);
         apply_effects(&mut g, &buf).expect("a recycled id must apply");
 
         // Fresh: past anything ever handed out.
         let mut buf = new_buffer();
-        write_create_node(&mut buf, &IdList::from([99]), &[], &[], &[]);
+        Record::CreateNode {
+            ids: IdList::from([99]),
+            labels: vec![],
+            attr_ids: vec![],
+            rows: vec![],
+        }
+        .encode(&mut buf);
         apply_effects(&mut g, &buf).expect("a fresh id must apply");
 
         // And a delete of something already binned is still refused.
@@ -982,9 +1101,21 @@ mod tests {
         // leaving the master with a node the replica never got.
         let mut g = graph();
         let mut buf = new_buffer();
-        write_create_node(&mut buf, &IdList::from([0]), &[], &[], &[]);
+        Record::CreateNode {
+            ids: IdList::from([0]),
+            labels: vec![],
+            attr_ids: vec![],
+            rows: vec![],
+        }
+        .encode(&mut buf);
         write_delete(&mut buf, &IdList::from([0]), &[]);
-        write_create_node(&mut buf, &IdList::from([0]), &[], &[], &[]);
+        Record::CreateNode {
+            ids: IdList::from([0]),
+            labels: vec![],
+            attr_ids: vec![],
+            rows: vec![],
+        }
+        .encode(&mut buf);
         apply_effects(&mut g, &buf).expect("the recreate is legitimate");
         assert_eq!(g.node_count(), 1);
     }
@@ -993,19 +1124,28 @@ mod tests {
     fn a_buffer_applies_end_to_end() {
         let mut g = graph();
         let mut buf = new_buffer();
-        write_add_schema(&mut buf, EntityType::Node, 0, "Person");
-        write_add_attribute(&mut buf, 0, "name");
-        write_create_node(
-            &mut buf,
-            &IdList::from([0, 1, 2]),
-            &[0],
-            &[0],
-            &[
+        Record::AddSchema {
+            schema_type: EntityType::Node,
+            id: 0,
+            name: "Person".to_owned(),
+        }
+        .encode(&mut buf);
+        Record::AddAttribute {
+            id: 0,
+            name: "name".to_owned(),
+        }
+        .encode(&mut buf);
+        Record::CreateNode {
+            ids: IdList::from([0, 1, 2]),
+            labels: vec![0],
+            attr_ids: vec![0],
+            rows: vec![
                 Value::String(Arc::new("a".into())),
                 Value::String(Arc::new("b".into())),
                 Value::String(Arc::new("c".into())),
             ],
-        );
+        }
+        .encode(&mut buf);
 
         apply_effects(&mut g, &buf).expect("buffer must apply");
         assert_eq!(g.get_labels().len(), 1);
@@ -1021,7 +1161,12 @@ mod tests {
         g.get_label_id_mut("Existing");
 
         let mut buf = new_buffer();
-        write_add_schema(&mut buf, EntityType::Node, 0, "Person");
+        Record::AddSchema {
+            schema_type: EntityType::Node,
+            id: 0,
+            name: "Person".to_owned(),
+        }
+        .encode(&mut buf);
 
         let err = apply_effects(&mut g, &buf).expect_err("must refuse");
         assert!(
@@ -1046,7 +1191,11 @@ mod tests {
         g.add_node_attribute_name("already_here");
 
         let mut buf = new_buffer();
-        write_add_attribute(&mut buf, 0, "name");
+        Record::AddAttribute {
+            id: 0,
+            name: "name".to_owned(),
+        }
+        .encode(&mut buf);
 
         let err = apply_effects(&mut g, &buf).expect_err("must refuse");
         assert!(
@@ -1069,15 +1218,19 @@ mod tests {
         g.add_node_attribute_name("a");
 
         let mut buf = new_buffer();
-        write_create_index(
-            &mut buf,
-            EntityType::Node,
-            0,
-            "Expected",
-            INDEX_FLD_RANGE,
-            &[AttrRef { id: 0, name: "a" }],
-            &Value::Null,
-        );
+        Record::Index {
+            create: true,
+            schema_type: EntityType::Node,
+            label_id: 0,
+            label: "Expected".to_owned(),
+            field_type: INDEX_FLD_RANGE,
+            fields: vec![AttrRef {
+                id: 0,
+                name: "a".to_owned(),
+            }],
+            options: Some(Value::Null),
+        }
+        .encode(&mut buf);
         let err = apply_effects(&mut g, &buf).expect_err("must refuse");
         let ApplyError::NameMismatch { name, local, .. } = &err else {
             panic!("expected a name mismatch, got {err:?}");
@@ -1090,9 +1243,25 @@ mod tests {
     fn labels_apply_to_every_node_in_the_record() {
         let mut g = graph();
         let mut buf = new_buffer();
-        write_add_schema(&mut buf, EntityType::Node, 0, "L");
-        write_create_node(&mut buf, &IdList::from([0, 1, 2, 3]), &[], &[], &[]);
-        write_labels(&mut buf, true, &IdList::from([0, 1, 2, 3]), &[0]);
+        Record::AddSchema {
+            schema_type: EntityType::Node,
+            id: 0,
+            name: "L".to_owned(),
+        }
+        .encode(&mut buf);
+        Record::CreateNode {
+            ids: IdList::from([0, 1, 2, 3]),
+            labels: vec![],
+            attr_ids: vec![],
+            rows: vec![],
+        }
+        .encode(&mut buf);
+        Record::Labels {
+            add: true,
+            ids: IdList::from([0, 1, 2, 3]),
+            labels: vec![0],
+        }
+        .encode(&mut buf);
 
         apply_effects(&mut g, &buf).expect("must apply");
         assert_eq!(g.label_node_count(&Arc::new("L".to_string())), 4);
@@ -1112,21 +1281,19 @@ mod tests {
             ConstraintStatus::Operational,
         ] {
             let mut buf = new_buffer();
-            write_constraint(
-                &mut buf,
-                true,
-                &ConstraintSpec {
-                    constraint_type: ConstraintType::Unique,
-                    entity_type: EntityType::Node,
-                    status: Some(status),
-                    label_id: 0,
-                    label: "Person",
-                    props: &[AttrRef {
-                        id: 0,
-                        name: "email",
-                    }],
-                },
-            );
+            Record::Constraint {
+                create: true,
+                constraint_type: ConstraintType::Unique,
+                entity_type: EntityType::Node,
+                status: Some(status),
+                label_id: 0,
+                label: "Person".to_owned(),
+                props: vec![AttrRef {
+                    id: 0,
+                    name: "email".to_owned(),
+                }],
+            }
+            .encode(&mut buf);
             apply_effects(&mut g, &buf).expect("announcement must apply");
         }
 
@@ -1146,23 +1313,30 @@ mod tests {
         // legitimately reach a different status.
         let mut g = graph();
         let mut buf = new_buffer();
-        write_add_schema(&mut buf, EntityType::Node, 0, "Person");
-        write_add_attribute(&mut buf, 0, "email");
-        write_constraint(
-            &mut buf,
-            true,
-            &ConstraintSpec {
-                constraint_type: ConstraintType::Unique,
-                entity_type: EntityType::Node,
-                status: Some(ConstraintStatus::Operational),
-                label_id: 0,
-                label: "Person",
-                props: &[AttrRef {
-                    id: 0,
-                    name: "email",
-                }],
-            },
-        );
+        Record::AddSchema {
+            schema_type: EntityType::Node,
+            id: 0,
+            name: "Person".to_owned(),
+        }
+        .encode(&mut buf);
+        Record::AddAttribute {
+            id: 0,
+            name: "email".to_owned(),
+        }
+        .encode(&mut buf);
+        Record::Constraint {
+            create: true,
+            constraint_type: ConstraintType::Unique,
+            entity_type: EntityType::Node,
+            status: Some(ConstraintStatus::Operational),
+            label_id: 0,
+            label: "Person".to_owned(),
+            props: vec![AttrRef {
+                id: 0,
+                name: "email".to_owned(),
+            }],
+        }
+        .encode(&mut buf);
 
         apply_effects(&mut g, &buf).expect("must apply");
         assert_eq!(g.constraints().len(), 1);
@@ -1172,8 +1346,19 @@ mod tests {
     fn a_malformed_buffer_is_refused_not_applied() {
         let mut g = graph();
         let mut buf = new_buffer();
-        write_add_schema(&mut buf, EntityType::Node, 0, "L");
-        write_create_node(&mut buf, &IdList::from([0, 1]), &[0], &[], &[]);
+        Record::AddSchema {
+            schema_type: EntityType::Node,
+            id: 0,
+            name: "L".to_owned(),
+        }
+        .encode(&mut buf);
+        Record::CreateNode {
+            ids: IdList::from([0, 1]),
+            labels: vec![0],
+            attr_ids: vec![],
+            rows: vec![],
+        }
+        .encode(&mut buf);
 
         for cut in 2..buf.len() {
             let mut fresh = graph();
@@ -1251,19 +1436,25 @@ mod tests {
                 g.add_node_attribute_name(name);
             }
             let mut buf = new_buffer();
-            write_create_node(&mut buf, &IdList::from([0]), &[], &[], &[]);
+            Record::CreateNode {
+                ids: IdList::from([0]),
+                labels: vec![],
+                attr_ids: vec![],
+                rows: vec![],
+            }
+            .encode(&mut buf);
             apply_effects(&mut g, &buf).expect("setup");
 
             let mut buf = new_buffer();
-            write_update(
-                &mut buf,
-                EntityType::Node,
-                &IdList::from([0]),
-                &[],
-                None,
-                &bad,
-                &[Value::Int(1), Value::Int(2)],
-            );
+            Record::Update {
+                entity: EntityType::Node,
+                ids: IdList::from([0]),
+                labels: vec![],
+                relation_id: None,
+                attr_ids: bad.to_vec(),
+                rows: vec![Value::Int(1), Value::Int(2)],
+            }
+            .encode(&mut buf);
             assert_eq!(
                 apply_effects(&mut g, &buf),
                 Err(ApplyError::AttrIdsNotAscending {
@@ -1291,7 +1482,11 @@ mod tests {
         // 2 and this was accepted, after which every record carrying attribute 2
         // wrote `r` on the replica and `q` on the primary.
         let mut buf = new_buffer();
-        write_add_attribute(&mut buf, 2, "q");
+        Record::AddAttribute {
+            id: 2,
+            name: "q".to_owned(),
+        }
+        .encode(&mut buf);
         assert!(
             matches!(
                 apply_effects(&mut g, &buf),
@@ -1303,12 +1498,20 @@ mod tests {
         // And the correct id for an already-registered name must be accepted —
         // length arithmetic rejected this one, stopping replication outright.
         let mut buf = new_buffer();
-        write_add_attribute(&mut buf, 1, "q");
+        Record::AddAttribute {
+            id: 1,
+            name: "q".to_owned(),
+        }
+        .encode(&mut buf);
         apply_effects(&mut g, &buf).expect("the real id of 'q' is 1");
 
         // A genuinely new name still lands on the next id.
         let mut buf = new_buffer();
-        write_add_attribute(&mut buf, 3, "s");
+        Record::AddAttribute {
+            id: 3,
+            name: "s".to_owned(),
+        }
+        .encode(&mut buf);
         apply_effects(&mut g, &buf).expect("'s' is the next id");
     }
 

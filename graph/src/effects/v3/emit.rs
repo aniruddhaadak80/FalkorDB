@@ -124,7 +124,7 @@ pub fn build_constraint_buffer(
     .ok_or_else(|| format!("constraint label '{label}' is not registered"))?;
 
     let names = g.get_node_attribute_names();
-    let props: Vec<v3::AttrRef<&str>> = properties
+    let props: Vec<v3::AttrRef<String>> = properties
         .iter()
         .map(|p| {
             names
@@ -132,7 +132,7 @@ pub fn build_constraint_buffer(
                 .position(|n| n == p)
                 .map(|i| v3::AttrRef {
                     id: i as u16,
-                    name: p.as_str(),
+                    name: p.as_str().to_owned(),
                 })
                 .ok_or_else(|| format!("constraint property '{p}' is not registered"))
         })
@@ -142,18 +142,20 @@ pub fn build_constraint_buffer(
         buf.extend_from_slice(&v3::new_buffer());
     }
     emit_schema_additions(g, baseline, &mut |record| record.encode(buf));
-    v3::write_constraint(
-        buf,
+    // Through `Record`, like everything else. This was the one production path
+    // that reached past the pivot into a record writer, which is also why it
+    // was the one that needed a `ConstraintSpec` to keep its argument list
+    // legible.
+    Record::Constraint {
         create,
-        &v3::ConstraintSpec {
-            constraint_type: ct,
-            entity_type,
-            status,
-            label_id,
-            label,
-            props: &props,
-        },
-    );
+        constraint_type: ct,
+        entity_type,
+        status,
+        label_id,
+        label: label.to_owned(),
+        props,
+    }
+    .encode(buf);
     Ok(())
 }
 
@@ -199,7 +201,7 @@ pub fn build_index_buffer(
     .ok_or_else(|| format!("index label '{}' is not registered", ix.label))?;
 
     let names = g.get_node_attribute_names();
-    let fields: Vec<v3::AttrRef<&str>> = ix
+    let fields: Vec<v3::AttrRef<String>> = ix
         .fields
         .iter()
         .map(|f| {
@@ -208,7 +210,7 @@ pub fn build_index_buffer(
                 .position(|n| n == f)
                 .map(|i| v3::AttrRef {
                     id: i as u16,
-                    name: f.as_str(),
+                    name: f.as_str().to_owned(),
                 })
                 .ok_or_else(|| format!("index field '{f}' is not registered"))
         })
@@ -218,20 +220,19 @@ pub fn build_index_buffer(
         buf.extend_from_slice(&v3::new_buffer());
     }
     emit_schema_additions(g, baseline, &mut |record| record.encode(buf));
-    let field_type = index_field_flags(ix.index_type);
-    if create {
-        v3::write_create_index(
-            buf,
-            ix.entity_type,
-            label_id,
-            ix.label,
-            field_type,
-            &fields,
-            ix.options.unwrap_or(&Value::Null),
-        );
-    } else {
-        v3::write_drop_index(buf, ix.entity_type, label_id, ix.label, field_type, &fields);
+    Record::Index {
+        create,
+        schema_type: ix.entity_type,
+        label_id,
+        label: ix.label.to_owned(),
+        field_type: index_field_flags(ix.index_type),
+        fields,
+        // A drop carries no options at all — not an empty map. The record says
+        // so with `None`; the writer used to be told twice, once by which
+        // function was called and once by the value passed.
+        options: create.then(|| ix.options.cloned().unwrap_or(Value::Null)),
     }
+    .encode(buf);
     Ok(())
 }
 
@@ -750,7 +751,6 @@ mod tests {
     use atomic_refcell::AtomicRefCell;
     // The module itself no longer needs these — the announced types moved to
     // `effects::announce` — but the tests still build the values they carry.
-    use crate::graph::constraint::{ConstraintStatus, ConstraintType};
     use std::sync::Arc;
 
     fn graph() -> AtomicRefCell<Graph> {
