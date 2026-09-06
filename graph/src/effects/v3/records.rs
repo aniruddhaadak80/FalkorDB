@@ -751,30 +751,6 @@ pub fn open_payload(buf: &[u8]) -> Result<Payload<'_>, DecodeError> {
     Ok(Payload(Cow::Owned(plain)))
 }
 
-/// Every record in a payload, materialized.
-///
-/// For tests and for the decode benchmark, which wants a whole payload's worth
-/// of work in one call. Nothing on the apply path uses it and nothing should:
-/// [`apply_effects`](super::apply::apply_effects) streams, so it never holds
-/// more than one record at a time, and [`EffectsPayload::describe`] renders
-/// them one at a time for the same reason.
-///
-/// `#[cfg(test)]` because those are its only callers, benches included — this
-/// crate compiles its benches under `cfg(test)` as in-crate `mod *_bench`.
-///
-/// # Errors
-///
-/// Returns [`DecodeError`] if the payload or any record in it is malformed.
-#[cfg(test)]
-pub(crate) fn read_buffer(buf: &[u8]) -> Result<Vec<Record>, DecodeError> {
-    let payload = open_payload(buf)?;
-    let mut records = Vec::new();
-    for record in payload.records() {
-        records.push(record?);
-    }
-    Ok(records)
-}
-
 /// Compress a finished payload in place, if that makes it smaller.
 ///
 /// **Default off.** Compression is a bandwidth trade, not a CPU one: measured
@@ -848,6 +824,7 @@ pub fn maybe_compress(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::effects::v3::test_aux::read_buffer;
 
     // ── records ──
 

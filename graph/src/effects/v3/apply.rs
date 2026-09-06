@@ -719,13 +719,9 @@ mod tests {
     use super::*;
     use crate::effects::EffectEncode;
     use crate::effects::v3::staging::StagePending;
+    use crate::effects::v3::test_aux::graph;
     use crate::effects::v3::{AttrRef, INDEX_FLD_RANGE, IdList, Record, new_buffer};
     use crate::graph::constraint::{ConstraintStatus, ConstraintType};
-
-    fn graph() -> Graph {
-        crate::graph::graphblas::test_init::ensure_init();
-        Graph::new(64, 64, 0, 0, "t")
-    }
 
     /// The delete-then-recreate cycle a replica legitimately sees.
     fn write_delete(
@@ -1398,7 +1394,9 @@ mod tests {
         let mut buf = crate::effects::v3::new_buffer();
         crate::effects::v3::emit::for_each_record(&p, &master, |r| r.encode(&mut buf));
         assert_eq!(
-            crate::effects::v3::read_buffer(&buf).unwrap().len(),
+            crate::effects::v3::test_aux::read_buffer(&buf)
+                .unwrap()
+                .len(),
             5,
             "2 schema + 1 attr + 2 shapes"
         );

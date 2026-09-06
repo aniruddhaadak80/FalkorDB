@@ -82,6 +82,8 @@ mod id_list;
 pub mod records;
 #[cfg(test)]
 mod staging;
+#[cfg(test)]
+mod test_aux;
 pub mod value;
 
 use num_enum::TryFromPrimitive;

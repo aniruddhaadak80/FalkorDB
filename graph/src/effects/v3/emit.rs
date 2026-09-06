@@ -294,29 +294,6 @@ pub fn for_each_record(
     digest_deleted_nodes(p, out);
 }
 
-/// Every record, materialized.
-///
-/// Not on the emit path, which streams through [`for_each_record`] and never
-/// holds more than one record at a time. This exists because tests and the
-/// codec benchmarks need the records as values — to assert on their shape, or
-/// to time encoding separately from digesting — and reconstructing them by
-/// decoding a buffer would test the decoder rather than the digest.
-///
-/// `#[cfg(test)]`, which is also what the codec benchmarks compile under: this
-/// crate keeps its benches inside `src` as `#[cfg(test)] mod *_bench` — see
-/// `graph/src/graph/graphblas/degree_bench.rs` and its three neighbours — so a
-/// bench sees this without it having to be public to the workspace.
-#[cfg(test)]
-#[must_use]
-pub(crate) fn digest(
-    p: &Pending,
-    g: &AtomicRefCell<Graph>,
-) -> Vec<Record> {
-    let mut out = Vec::new();
-    for_each_record(p, g, |record| out.push(record));
-    out
-}
-
 fn digest_created_nodes(
     p: &Pending,
     out: &mut impl FnMut(Record),
@@ -718,8 +695,12 @@ fn gather_rows(
 mod tests {
     use super::*;
     use crate::effects::EffectWrite;
+    use crate::effects::v3::Record;
     use crate::effects::v3::staging::StagePending;
-    use crate::effects::v3::{Record, read_buffer};
+    use crate::effects::v3::test_aux::{
+        digest, encode_all, graph_cell as graph, live_node, read_buffer, round_trip as build,
+        with_attrs, with_edge,
+    };
     use crate::entity_type::EntityType;
     use crate::graph::graphblas::test_init::ensure_init;
     use crate::runtime::pending::Pending;
@@ -727,12 +708,6 @@ mod tests {
     // The module itself no longer needs these — the announced types moved to
     // `effects::announce` — but the tests still build the values they carry.
     use std::sync::Arc;
-
-    fn graph() -> AtomicRefCell<Graph> {
-        // GrB_init is process-wide and may only run once.
-        ensure_init();
-        AtomicRefCell::new(Graph::new(64, 64, 0, 0, "t"))
-    }
 
     /// The `AnnouncedIndex` the two index tests announce.
     fn announced<'a>(
@@ -779,7 +754,7 @@ mod tests {
         )
         .unwrap();
 
-        let records = v3::read_buffer(&buf).unwrap();
+        let records = read_buffer(&buf).unwrap();
         // schema first: the ids on the index record are only meaningful after it
         assert!(matches!(records[0], Record::AddSchema { id: 0, .. }));
         assert!(matches!(records[1], Record::AddAttribute { id: 0, .. }));
@@ -828,46 +803,9 @@ mod tests {
     }
 
     /// Register `n` node attributes so the ids the tests use resolve.
-    fn with_attrs(
-        g: &AtomicRefCell<Graph>,
-        names: &[&str],
-    ) {
-        let mut graph = g.borrow_mut();
-        for name in names {
-            graph.add_node_attribute_name(name);
-        }
-    }
-
     /// A committed edge of the named type, so the emitter has a type to read.
-    fn with_edge(
-        g: &AtomicRefCell<Graph>,
-        type_name: &str,
-        id: u64,
-    ) {
-        let mut graph = g.borrow_mut();
-        graph.add_reserved_relationship_count(1);
-        graph.create_relationships_bulk(&Arc::new(type_name.to_owned()), &[0], &[1], &[id]);
-    }
-
     /// The loop `format::build` runs, so the tests still go through the bytes
     /// rather than stopping at the records.
-    fn encode_all(
-        p: &Pending,
-        g: &AtomicRefCell<Graph>,
-        buf: &mut Vec<u8>,
-    ) {
-        for_each_record(p, g, |record| record.encode(buf));
-    }
-
-    fn build(
-        p: &Pending,
-        g: &AtomicRefCell<Graph>,
-    ) -> Vec<Record> {
-        let mut buf = v3::new_buffer();
-        encode_all(p, g, &mut buf);
-        read_buffer(&buf).expect("v3 buffer must decode")
-    }
-
     #[test]
     fn nodes_of_one_shape_become_one_record() {
         let g = graph();
@@ -898,29 +836,6 @@ mod tests {
     }
 
     /// Put `id` in the graph carrying `labels`, so the emitter can derive them.
-    fn live_node(
-        g: &AtomicRefCell<Graph>,
-        id: u64,
-        labels: &[&str],
-    ) {
-        let mut graph = g.borrow_mut();
-        let ids: RoaringTreemap = std::iter::once(id).collect();
-        // `create_nodes` consumes a reservation, exactly as the apply path does
-        // before it — without this the counter underflows.
-        graph.inc_reserved_node_count();
-        graph.create_nodes(&ids);
-        let mut rows = Vec::new();
-        let mut cols = Vec::new();
-        for name in labels {
-            rows.push(id);
-            cols.push(graph.get_label_id_mut(name).0 as u64);
-        }
-        if !rows.is_empty() {
-            let mut docs = FxHashMap::default();
-            graph.set_nodes_labels_bulk(&rows, &cols, &mut docs, true);
-        }
-    }
-
     #[test]
     fn a_multi_labeled_node_is_its_own_partition() {
         // CREATE (:A), (:B), (:A:B) — three label sets, so three records. The
