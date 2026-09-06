@@ -64,10 +64,22 @@ pub trait EffectWrite {
         v: f64,
     );
 
-    /// C's `LabelID` and `RelationID` are `int`, so signed and 4 bytes.
-    fn label_id(
+    /// A schema id — C's `LabelID` or `RelationID`. Four bytes, and
+    /// **unsigned**.
+    ///
+    /// C declares both as `int` and reserves the negatives for sentinels:
+    /// `GRAPH_NO_LABEL` and `GRAPH_NO_RELATION` are -1, `GRAPH_UNKNOWN_LABEL`
+    /// and `GRAPH_UNKNOWN_RELATION` are -2. None of them is a schema id, and
+    /// none of them belongs in a payload — an effect names a label that exists.
+    /// A `u32` says that in the type rather than in a runtime check, which is
+    /// the difference between "we do not send those" and "we cannot".
+    ///
+    /// The bytes are unchanged: every id we send is far below `i32::MAX`, and
+    /// `u32::to_le_bytes` and `i32::to_le_bytes` agree there, so C reads the
+    /// same four bytes into its `int` as before.
+    fn schema_id(
         &mut self,
-        v: i32,
+        v: u32,
     );
 
     /// A C string: length **including** the NUL terminator, then the bytes and
@@ -123,9 +135,9 @@ impl EffectWrite for Vec<u8> {
         self.extend_from_slice(&v.to_le_bytes());
     }
 
-    fn label_id(
+    fn schema_id(
         &mut self,
-        v: i32,
+        v: u32,
     ) {
         self.extend_from_slice(&v.to_le_bytes());
     }

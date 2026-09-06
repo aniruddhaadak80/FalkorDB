@@ -13,14 +13,14 @@ use super::{DecodeError, EffectDecode, EffectEncode, EffectWrite, Reader};
 /// `RelType` — one relationship id per record, part of the partition key.
 pub fn write_rel_type(
     buf: &mut Vec<u8>,
-    relation_id: i32,
+    relation_id: u32,
 ) {
-    buf.label_id(relation_id);
+    buf.schema_id(relation_id);
 }
 
 /// Inverse of [`write_rel_type`].
-pub fn read_rel_type(r: &mut Reader<'_>) -> Result<i32, DecodeError> {
-    r.i32()
+pub fn read_rel_type(r: &mut Reader<'_>) -> Result<u32, DecodeError> {
+    r.u32()
 }
 
 // ── LabelSet ──
@@ -32,7 +32,7 @@ pub fn read_rel_type(r: &mut Reader<'_>) -> Result<i32, DecodeError> {
 /// every row in the record.
 pub fn write_label_set(
     buf: &mut Vec<u8>,
-    labels: &[i32],
+    labels: &[u32],
 ) {
     // Count and payload together, before either is written: the exact size is
     // known here, so the block costs at most one growth however long it is.
@@ -42,9 +42,9 @@ pub fn write_label_set(
 }
 
 /// Inverse of [`write_label_set`].
-pub fn read_label_set(r: &mut Reader<'_>) -> Result<Vec<i32>, DecodeError> {
+pub fn read_label_set(r: &mut Reader<'_>) -> Result<Vec<u32>, DecodeError> {
     let n = r.u16()?;
-    r.take_n(u64::from(n), i32::from_le_bytes)
+    r.take_n(u64::from(n), u32::from_le_bytes)
 }
 
 // ── AttrSet ──

@@ -35,7 +35,7 @@ fn write_header(
 pub fn write_create_node(
     buf: &mut Vec<u8>,
     ids: &IdList,
-    labels: &[i32],
+    labels: &[u32],
     attr_ids: &[u16],
     rows: &[Value],
 ) {
@@ -54,7 +54,7 @@ pub fn write_create_node(
 pub fn write_create_edge(
     buf: &mut Vec<u8>,
     ids: &IdList,
-    relation_id: i32,
+    relation_id: u32,
     src: &IdList,
     dst: &IdList,
     attr_ids: &[u16],
@@ -109,8 +109,8 @@ pub fn write_update(
     buf: &mut Vec<u8>,
     entity: EntityType,
     ids: &IdList,
-    labels: &[i32],
-    relation_id: Option<i32>,
+    labels: &[u32],
+    relation_id: Option<u32>,
     attr_ids: &[u16],
     rows: &[Value],
 ) {
@@ -135,7 +135,7 @@ pub fn write_update(
 pub fn write_delete_node(
     buf: &mut Vec<u8>,
     ids: &IdList,
-    labels: &[i32],
+    labels: &[u32],
 ) {
     write_header(buf, Opcode::DeleteNode, Some(ids.count()));
     write_label_set(buf, labels);
@@ -149,7 +149,7 @@ pub fn write_delete_node(
 pub fn write_delete_edge(
     buf: &mut Vec<u8>,
     ids: &IdList,
-    relation_id: i32,
+    relation_id: u32,
     src: &IdList,
     dst: &IdList,
 ) {
@@ -173,7 +173,7 @@ pub fn write_labels(
     buf: &mut Vec<u8>,
     add: bool,
     ids: &IdList,
-    labels: &[i32],
+    labels: &[u32],
 ) {
     let opcode = if add {
         Opcode::SetLabels
@@ -194,12 +194,12 @@ pub fn write_labels(
 pub fn write_add_schema(
     buf: &mut Vec<u8>,
     schema_type: EntityType,
-    id: i32,
+    id: u32,
     name: &str,
 ) {
     write_header(buf, Opcode::AddSchema, None);
     buf.u32(schema_tag(schema_type));
-    buf.label_id(id);
+    buf.schema_id(id);
     buf.string(name);
 }
 
@@ -247,7 +247,7 @@ pub struct AttrRef<S> {
 pub fn write_create_index(
     buf: &mut Vec<u8>,
     schema_type: EntityType,
-    label_id: i32,
+    label_id: u32,
     label: &str,
     field_type: u32,
     fields: &[AttrRef<&str>],
@@ -255,7 +255,7 @@ pub fn write_create_index(
 ) {
     write_header(buf, Opcode::CreateIndex, None);
     buf.u32(schema_tag(schema_type));
-    buf.label_id(label_id);
+    buf.schema_id(label_id);
     buf.string(label);
     buf.u32(field_type);
     write_index_fields(buf, fields);
@@ -308,14 +308,14 @@ fn read_index_fields(r: &mut Reader<'_>) -> Result<Vec<AttrRef<String>>, DecodeE
 pub fn write_drop_index(
     buf: &mut Vec<u8>,
     schema_type: EntityType,
-    label_id: i32,
+    label_id: u32,
     label: &str,
     field_type: u32,
     fields: &[AttrRef<&str>],
 ) {
     write_header(buf, Opcode::DropIndex, None);
     buf.u32(schema_tag(schema_type));
-    buf.label_id(label_id);
+    buf.schema_id(label_id);
     buf.string(label);
     buf.u32(field_type);
     write_index_fields(buf, fields);
@@ -335,7 +335,7 @@ pub struct ConstraintSpec<'a> {
     pub entity_type: EntityType,
     /// The primary's outcome, and `None` for a drop. See [`write_constraint`].
     pub status: Option<ConstraintStatus>,
-    pub label_id: i32,
+    pub label_id: u32,
     pub label: &'a str,
     pub props: &'a [AttrRef<&'a str>],
 }
@@ -383,7 +383,7 @@ pub fn write_constraint(
     if let Some(status) = status {
         buf.u32(constraint_status_tag(status));
     }
-    buf.label_id(label_id);
+    buf.schema_id(label_id);
     buf.string(label);
     // Floor, as above: 2 bytes of id and an 8-byte length per property.
     buf.reserve(1 + props.len() * 10);
@@ -410,22 +410,22 @@ pub enum Record {
         ids: IdList,
         /// The nodes' derived labels. Always empty for [`EntityType::Relationship`],
         /// which carries a [`Self::Update::relation_id`] in the same slot instead.
-        labels: Vec<i32>,
+        labels: Vec<u32>,
         /// The edges' one relationship type. `None` for [`EntityType::Node`],
         /// whose membership is the label set above.
-        relation_id: Option<i32>,
+        relation_id: Option<u32>,
         attr_ids: Vec<u16>,
         rows: Vec<Value>,
     },
     CreateNode {
         ids: IdList,
-        labels: Vec<i32>,
+        labels: Vec<u32>,
         attr_ids: Vec<u16>,
         rows: Vec<Value>,
     },
     CreateEdge {
         ids: IdList,
-        relation_id: i32,
+        relation_id: u32,
         src: IdList,
         dst: IdList,
         attr_ids: Vec<u16>,
@@ -433,22 +433,22 @@ pub enum Record {
     },
     DeleteNode {
         ids: IdList,
-        labels: Vec<i32>,
+        labels: Vec<u32>,
     },
     DeleteEdge {
         ids: IdList,
-        relation_id: i32,
+        relation_id: u32,
         src: IdList,
         dst: IdList,
     },
     Labels {
         add: bool,
         ids: IdList,
-        labels: Vec<i32>,
+        labels: Vec<u32>,
     },
     AddSchema {
         schema_type: EntityType,
-        id: i32,
+        id: u32,
         name: String,
     },
     AddAttribute {
@@ -458,7 +458,7 @@ pub enum Record {
     Index {
         create: bool,
         schema_type: EntityType,
-        label_id: i32,
+        label_id: u32,
         label: String,
         /// C's index-field flags. A property of the statement, not of a field.
         field_type: u32,
@@ -473,7 +473,7 @@ pub enum Record {
         entity_type: EntityType,
         /// The primary's outcome; `None` on a drop, which carries none.
         status: Option<ConstraintStatus>,
-        label_id: i32,
+        label_id: u32,
         label: String,
         props: Vec<AttrRef<String>>,
     },
@@ -576,7 +576,7 @@ pub fn read_record(r: &mut Reader<'_>) -> Result<Record, DecodeError> {
         }
         Opcode::AddSchema => {
             let schema_type = entity_from_schema_tag(r.u32()?)?;
-            let id = r.i32()?;
+            let id = r.u32()?;
             Record::AddSchema {
                 schema_type,
                 id,
@@ -593,7 +593,7 @@ pub fn read_record(r: &mut Reader<'_>) -> Result<Record, DecodeError> {
         Opcode::CreateIndex | Opcode::DropIndex => {
             let create = opcode == Opcode::CreateIndex;
             let schema_type = entity_from_schema_tag(r.u32()?)?;
-            let label_id = r.i32()?;
+            let label_id = r.u32()?;
             let label = r.string()?;
             let field_type = r.u32()?;
             let fields = read_index_fields(r)?;
@@ -622,7 +622,7 @@ pub fn read_record(r: &mut Reader<'_>) -> Result<Record, DecodeError> {
             } else {
                 None
             };
-            let label_id = r.i32()?;
+            let label_id = r.u32()?;
             let label = r.string()?;
             let n = r.u8()?;
             // Each pair is at least 2 bytes of id plus an 8-byte length.

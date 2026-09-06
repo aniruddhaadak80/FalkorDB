@@ -44,8 +44,8 @@ use crate::effects::announce::{AnnouncedConstraint, AnnouncedIndex, SchemaBaseli
 /// Unreachable in practice: a graph does not hold two billion labels. That is
 /// exactly the argument that was made for `props.len() as u8`, which silently
 /// wrote 0 for a 256th property, so it is made loudly here instead.
-fn schema_id(id: usize) -> i32 {
-    i32::try_from(id).expect("a schema id must fit C's int; the dictionary cannot be this large")
+fn schema_id(id: usize) -> u32 {
+    u32::try_from(id).expect("a schema id must fit four bytes; the dictionary cannot be this large")
 }
 
 /// Announce every schema and attribute registered since `baseline`.
@@ -236,7 +236,7 @@ pub fn build_index_buffer(
 }
 
 /// A record's partition key: its label set and its attribute ids.
-type Shape = (Vec<i32>, Vec<u16>);
+type Shape = (Vec<u32>, Vec<u16>);
 
 /// Build a v3 effects payload from what a query staged.
 ///
@@ -511,11 +511,11 @@ fn digest_updates(
     // labels for a node, the one relationship type for an edge. Both go in the
     // key, because both go on the wire, and a record can only state one of
     // them for the whole group.
-    let mut groups: FxHashMap<(Vec<i32>, Option<i32>, Vec<u16>), Vec<u64>> = FxHashMap::default();
+    let mut groups: FxHashMap<(Vec<u32>, Option<u32>, Vec<u16>), Vec<u64>> = FxHashMap::default();
     for (id, pairs) in attrs {
         let attr_ids: Vec<u16> = pairs.iter().map(|(aid, _)| *aid).collect();
-        let mut labels: Vec<i32> = Vec::new();
-        let mut relation_id: Option<i32> = None;
+        let mut labels: Vec<u32> = Vec::new();
+        let mut relation_id: Option<u32> = None;
         match entity {
             EntityType::Node => {
                 labels.extend(
@@ -612,11 +612,11 @@ fn digest_deleted_nodes(
     let pairs = &p.deleted_node_labels;
     let mut cursor = 0;
 
-    let mut shapes: Vec<Vec<i32>> = Vec::new();
+    let mut shapes: Vec<Vec<u32>> = Vec::new();
     let mut buckets: Vec<IdList> = Vec::new();
-    let mut index: FxHashMap<Vec<i32>, usize> = FxHashMap::default();
+    let mut index: FxHashMap<Vec<u32>, usize> = FxHashMap::default();
     let mut last: Option<usize> = None;
-    let mut labels: Vec<i32> = Vec::new();
+    let mut labels: Vec<u32> = Vec::new();
 
     for id in &p.deleted_nodes {
         while cursor < pairs.len() && pairs[cursor].node < id {
@@ -648,7 +648,7 @@ fn digest_deleted_nodes(
         buckets[slot].push(id);
     }
 
-    let groups: FxHashMap<Vec<i32>, IdList> = shapes.into_iter().zip(buckets).collect();
+    let groups: FxHashMap<Vec<u32>, IdList> = shapes.into_iter().zip(buckets).collect();
     for (labels, ids) in sorted_groups(groups) {
         out(Record::DeleteNode { ids, labels });
     }
@@ -664,12 +664,12 @@ fn digest_labels(
     add: bool,
     out: &mut impl FnMut(Record),
 ) {
-    let mut groups: FxHashMap<Vec<i32>, Vec<u64>> = FxHashMap::default();
+    let mut groups: FxHashMap<Vec<u32>, Vec<u64>> = FxHashMap::default();
     for (&id, label_ids) in labels {
         if skip.is_some_and(|s| s.contains(id)) {
             continue;
         }
-        let mut shape: Vec<i32> = label_ids.iter().map(|&v| schema_id(v as usize)).collect();
+        let mut shape: Vec<u32> = label_ids.iter().map(|&v| schema_id(v as usize)).collect();
         shape.sort_unstable();
         shape.dedup();
         groups.entry(shape).or_default().push(id);
@@ -948,7 +948,7 @@ mod tests {
 
         let records = build(&p, &g);
         assert_eq!(records.len(), 3, "{records:#?}");
-        let mut seen: Vec<(Vec<i32>, Vec<u64>)> = records
+        let mut seen: Vec<(Vec<u32>, Vec<u64>)> = records
             .iter()
             .map(|r| {
                 let Record::CreateNode { ids, labels, .. } = r else {
@@ -1012,7 +1012,7 @@ mod tests {
 
         let records = build(&p, &g);
         assert_eq!(records.len(), 2, "{records:#?}");
-        let mut seen: Vec<(Vec<i32>, Vec<u64>)> = records
+        let mut seen: Vec<(Vec<u32>, Vec<u64>)> = records
             .iter()
             .map(|r| {
                 let Record::Update {
@@ -1044,7 +1044,7 @@ mod tests {
 
         let records = build(&p, &g);
         assert_eq!(records.len(), 2, "{records:#?}");
-        let mut seen: Vec<(Vec<i32>, Vec<u64>)> = records
+        let mut seen: Vec<(Vec<u32>, Vec<u64>)> = records
             .iter()
             .map(|r| {
                 let Record::DeleteNode { ids, labels } = r else {
@@ -1070,7 +1070,7 @@ mod tests {
 
         let records = build(&p, &g);
         assert_eq!(records.len(), 2, "{records:#?}");
-        let mut seen: Vec<(Vec<i32>, Vec<u64>)> = records
+        let mut seen: Vec<(Vec<u32>, Vec<u64>)> = records
             .iter()
             .map(|r| {
                 let Record::DeleteNode { ids, labels } = r else {
@@ -1128,7 +1128,7 @@ mod tests {
         p.stage_updated_edge(6, &[(0, Value::Int(2))]);
 
         let records = build(&p, &g);
-        let mut types: Vec<Option<i32>> = records
+        let mut types: Vec<Option<u32>> = records
             .iter()
             .map(|r| match r {
                 Record::Update { relation_id, .. } => *relation_id,

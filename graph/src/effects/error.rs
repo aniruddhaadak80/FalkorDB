@@ -172,8 +172,26 @@ pub enum ApplyError {
     )]
     NodeNotLive { id: u64, reason: &'static str },
 
+    /// A schema id the local dictionary does not hold.
+    ///
+    /// The field is unsigned on the wire, so C's sentinels cannot arrive as
+    /// themselves — `GRAPH_NO_LABEL` (-1) reads as 4294967295 and lands here.
+    /// That is the right outcome and the number is the honest one: those values
+    /// are not schema ids, and a payload naming one has diverged whichever way
+    /// it is spelled.
     #[error("{kind} id {id} out of range")]
     IdOutOfRange { kind: &'static str, id: i64 },
+
+    /// An `UPDATE_EDGE` that carried no relationship type.
+    ///
+    /// Its own variant rather than an `IdOutOfRange` with a made-up id: nothing
+    /// was out of range, the field was absent, and reporting it as "id -1 out
+    /// of range" invented exactly the sentinel this format does not use.
+    #[error(
+        "effects buffer updates an edge without naming its relationship type. \
+         The two engines have diverged; the buffer was not applied."
+    )]
+    MissingRelType,
 
     #[error("unknown {kind}: {value}")]
     UnknownDiscriminant { kind: &'static str, value: u32 },

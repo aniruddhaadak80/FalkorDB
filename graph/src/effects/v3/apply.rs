@@ -389,7 +389,7 @@ fn apply_record(
 fn apply_add_schema(
     g: &mut Graph,
     schema_type: EntityType,
-    id: i32,
+    id: u32,
     name: &str,
 ) -> Result<(), ApplyError> {
     match schema_type {
@@ -496,7 +496,7 @@ fn verify_id(
 fn verify_schema(
     g: &Graph,
     schema_type: EntityType,
-    id: i32,
+    id: u32,
     name: &str,
 ) -> Result<(), ApplyError> {
     let (kind, local) = match schema_type {
@@ -549,17 +549,13 @@ fn resolved(
 
 fn resolve_type(
     g: &Graph,
-    relation_id: i32,
+    relation_id: u32,
 ) -> Result<Arc<String>, ApplyError> {
-    let out_of_range = || ApplyError::IdOutOfRange {
-        kind: "relationship type",
-        id: i64::from(relation_id),
-    };
-    if relation_id < 0 {
-        return Err(out_of_range());
-    }
     g.get_type(TypeId(relation_id as usize))
-        .ok_or_else(out_of_range)
+        .ok_or(ApplyError::IdOutOfRange {
+            kind: "relationship type",
+            id: i64::from(relation_id),
+        })
 }
 
 /// An `UPDATE_EDGE`'s relationship type, checked against this graph.
@@ -571,12 +567,9 @@ fn resolve_type(
 /// type it invented.
 fn checked_type_id(
     g: &Graph,
-    relation_id: Option<i32>,
+    relation_id: Option<u32>,
 ) -> Result<TypeId, ApplyError> {
-    let relation_id = relation_id.ok_or(ApplyError::IdOutOfRange {
-        kind: "relationship type",
-        id: -1,
-    })?;
+    let relation_id = relation_id.ok_or(ApplyError::MissingRelType)?;
     resolve_type(g, relation_id)?;
     Ok(TypeId(relation_id as usize))
 }
@@ -591,19 +584,23 @@ fn checked_type_id(
 /// regrouped it straight back.
 fn checked_label_ids(
     g: &Graph,
-    labels: &[i32],
+    labels: &[u32],
 ) -> Result<Vec<u64>, ApplyError> {
     let bound = g.get_labels().len();
     labels
         .iter()
         .map(|&label| {
-            if label < 0 || label as usize >= bound {
+            // No `< 0` arm: the wire field is unsigned, so a sentinel cannot
+            // arrive as one. A peer that wrote C's -1 into these four bytes
+            // arrives here as 4294967295 and fails the same bound, which
+            // `IdOutOfRange` renders both ways.
+            if label as usize >= bound {
                 return Err(ApplyError::IdOutOfRange {
                     kind: "label",
                     id: i64::from(label),
                 });
             }
-            Ok(label as u64)
+            Ok(u64::from(label))
         })
         .collect()
 }
@@ -737,7 +734,7 @@ mod tests {
     fn write_delete(
         buf: &mut Vec<u8>,
         ids: &IdList,
-        labels: &[i32],
+        labels: &[u32],
     ) {
         crate::effects::v3::write_delete_node(buf, ids, labels);
     }
