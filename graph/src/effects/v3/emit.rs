@@ -31,6 +31,23 @@ use crate::{
 
 use crate::effects::announce::{AnnouncedConstraint, AnnouncedIndex, SchemaBaseline};
 
+/// A schema id as the wire carries it: C's `LabelID`/`RelationID`, which is a
+/// signed `int`.
+///
+/// Checked rather than `as i32`, and the sentinels are why. C reserves the
+/// negatives — `GRAPH_NO_LABEL` and `GRAPH_NO_RELATION` are -1,
+/// `GRAPH_UNKNOWN_LABEL` and `GRAPH_UNKNOWN_RELATION` are -2 — so a truncating
+/// cast of a `usize` past `i32::MAX` would not merely be a wrong id, it would
+/// be one of C's "there is no label here" values, and the replica would act on
+/// it rather than reject it.
+///
+/// Unreachable in practice: a graph does not hold two billion labels. That is
+/// exactly the argument that was made for `props.len() as u8`, which silently
+/// wrote 0 for a 256th property, so it is made loudly here instead.
+fn schema_id(id: usize) -> i32 {
+    i32::try_from(id).expect("a schema id must fit C's int; the dictionary cannot be this large")
+}
+
 /// Announce every schema and attribute registered since `baseline`.
 pub fn emit_schema_additions(
     g: &Graph,
@@ -40,14 +57,14 @@ pub fn emit_schema_additions(
     for (offset, label) in g.get_labels().iter().enumerate().skip(baseline.labels) {
         out(Record::AddSchema {
             schema_type: EntityType::Node,
-            id: offset as i32,
+            id: schema_id(offset),
             name: label.to_string(),
         });
     }
     for (offset, rel_type) in g.get_types().iter().enumerate().skip(baseline.types) {
         out(Record::AddSchema {
             schema_type: EntityType::Relationship,
-            id: offset as i32,
+            id: schema_id(offset),
             name: rel_type.to_string(),
         });
     }
@@ -103,8 +120,8 @@ pub fn build_constraint_buffer(
         EntityType::Node => g.get_label_id(label).map(|l| l.0),
         EntityType::Relationship => g.get_type_id(label).map(|t| t.0),
     }
-    .ok_or_else(|| format!("constraint label '{label}' is not registered"))?
-        as i32;
+    .map(schema_id)
+    .ok_or_else(|| format!("constraint label '{label}' is not registered"))?;
 
     let names = g.get_node_attribute_names();
     let props: Vec<v3::AttrRef<&str>> = properties
@@ -178,8 +195,8 @@ pub fn build_index_buffer(
         EntityType::Node => g.get_label_id(ix.label).map(|l| l.0),
         EntityType::Relationship => g.get_type_id(ix.label).map(|t| t.0),
     }
-    .ok_or_else(|| format!("index label '{}' is not registered", ix.label))?
-        as i32;
+    .map(schema_id)
+    .ok_or_else(|| format!("index label '{}' is not registered", ix.label))?;
 
     let names = g.get_node_attribute_names();
     let fields: Vec<v3::AttrRef<&str>> = ix
@@ -358,7 +375,7 @@ fn digest_created_nodes(
         let (labels, attr_ids) = &mut key;
         labels.clear();
         if let Some(l) = p.set_labels.get(&id) {
-            labels.extend(l.iter().map(|&v| v as i32));
+            labels.extend(l.iter().map(|&v| schema_id(v as usize)));
             labels.sort_unstable();
             labels.dedup();
         }
@@ -405,7 +422,8 @@ fn digest_created_edges(
         let relation_id = graph
             .get_type_id(type_name)
             .expect("created relationship type must be registered")
-            .0 as i32;
+            .0;
+        let relation_id = schema_id(relation_id);
         // Already partitioned by type; split further by attribute shape.
         let mut groups: FxHashMap<Vec<u16>, Vec<(u64, u64, u64)>> = FxHashMap::default();
         for &(rel_id, from, to) in entries {
@@ -465,7 +483,7 @@ fn digest_deleted_edges(
         rows.sort_unstable();
         out(Record::DeleteEdge {
             ids: rows.iter().map(|r| r.0).collect(),
-            relation_id: type_id as i32,
+            relation_id: schema_id(type_id as usize),
             src: rows.iter().map(|r| r.1).collect(),
             dst: rows.iter().map(|r| r.2).collect(),
         });
@@ -503,7 +521,7 @@ fn digest_updates(
                 labels.extend(
                     graph
                         .get_node_label_ids(NodeId::from(*id))
-                        .map(|l| l.0 as i32),
+                        .map(|l| schema_id(l.0)),
                 );
                 // Ascending and deduplicated, matching `digest_created_nodes`:
                 // the same label set has to hash to the same shape and
@@ -528,7 +546,7 @@ fn digest_updates(
                 let Some(type_id) = graph.type_id_for_edge(RelationshipId::from(*id)) else {
                     continue;
                 };
-                relation_id = Some(type_id.0 as i32);
+                relation_id = Some(schema_id(type_id.0));
             }
         }
         groups
@@ -606,7 +624,7 @@ fn digest_deleted_nodes(
         }
         labels.clear();
         while cursor < pairs.len() && pairs[cursor].node == id {
-            labels.push(pairs[cursor].label as i32);
+            labels.push(schema_id(pairs[cursor].label as usize));
             cursor += 1;
         }
         labels.sort_unstable();
@@ -651,7 +669,7 @@ fn digest_labels(
         if skip.is_some_and(|s| s.contains(id)) {
             continue;
         }
-        let mut shape: Vec<i32> = label_ids.iter().map(|&v| v as i32).collect();
+        let mut shape: Vec<i32> = label_ids.iter().map(|&v| schema_id(v as usize)).collect();
         shape.sort_unstable();
         shape.dedup();
         groups.entry(shape).or_default().push(id);
