@@ -7,13 +7,13 @@
 
 use atomic_refcell::AtomicRefCell;
 
-use super::emit::{build_constraint_buffer, build_effects_buffer, build_index_buffer};
+use super::emit::{build_constraint_buffer, build_index_buffer, for_each_record};
 use super::{
     EFFECTS_VERSION, FLAG_COMPRESSED, apply::ApplyError, apply::apply_effects, open_payload, seal,
 };
-use crate::effects::EffectWrite;
 use crate::effects::announce::{AnnouncedConstraint, AnnouncedIndex, SchemaBaseline};
 use crate::effects::v3;
+use crate::effects::{EffectEncode, EffectWrite};
 use crate::effects::{EffectsFormat, EffectsPayload, ReplicationSink};
 use crate::graph::graph::Graph;
 use crate::runtime::pending::Pending;
@@ -117,7 +117,15 @@ impl EffectsFormat<EFFECTS_VERSION> for EffectsPayload {
         graph: &AtomicRefCell<Graph>,
         buf: &mut W,
     ) -> u64 {
-        build_effects_buffer(pending, graph, buf)
+        // The loop itself, not a call to a function that is only this loop.
+        // `emit` decides *which* records a commit implies; turning one into
+        // bytes is this module's job, and there was nothing in between.
+        let mut n = 0;
+        for_each_record(pending, graph, |record| {
+            record.encode(buf);
+            n += 1;
+        });
+        n
     }
 
     fn build_index<W: EffectWrite + ?Sized>(

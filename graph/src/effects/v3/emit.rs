@@ -233,26 +233,6 @@ pub fn build_index_buffer<W: EffectWrite + ?Sized>(
 /// A record's partition key: its label set and its attribute ids.
 type Shape = (Vec<u32>, Vec<u16>);
 
-/// Build a v3 effects payload from what a query staged.
-///
-/// Digest, then encode. Returns the number of records written.
-///
-/// Appends to `buf`, which arrives already framed — see
-/// [`crate::effects::EffectsBuffer`], which is the only thing that makes one
-/// and the only caller of this.
-pub fn build_effects_buffer<W: EffectWrite + ?Sized>(
-    p: &Pending,
-    g: &AtomicRefCell<Graph>,
-    buf: &mut W,
-) -> u64 {
-    let mut n = 0;
-    for_each_record(p, g, |record| {
-        record.encode(buf);
-        n += 1;
-    });
-    n
-}
-
 /// Every record a committed `Pending` implies, in apply order, handed to `out`
 /// one at a time.
 ///
@@ -863,12 +843,22 @@ mod tests {
         graph.create_relationships_bulk(&Arc::new(type_name.to_owned()), &[0], &[1], &[id]);
     }
 
+    /// The loop `format::build` runs, so the tests still go through the bytes
+    /// rather than stopping at the records.
+    fn encode_all(
+        p: &Pending,
+        g: &AtomicRefCell<Graph>,
+        buf: &mut Vec<u8>,
+    ) {
+        for_each_record(p, g, |record| record.encode(buf));
+    }
+
     fn build(
         p: &Pending,
         g: &AtomicRefCell<Graph>,
     ) -> Vec<Record> {
         let mut buf = v3::new_buffer();
-        build_effects_buffer(p, g, &mut buf);
+        encode_all(p, g, &mut buf);
         read_buffer(&buf).expect("v3 buffer must decode")
     }
 
@@ -1281,9 +1271,9 @@ mod tests {
         }
 
         let mut a = v3::new_buffer();
-        build_effects_buffer(&forward, &g, &mut a);
+        encode_all(&forward, &g, &mut a);
         let mut b = v3::new_buffer();
-        build_effects_buffer(&backward, &g, &mut b);
+        encode_all(&backward, &g, &mut b);
         assert_eq!(a, b, "insertion order must not reach the wire");
     }
 
@@ -1469,7 +1459,7 @@ mod tests {
 
         let digested = digest(&p, &g);
         let mut buf = v3::new_buffer();
-        build_effects_buffer(&p, &g, &mut buf);
+        encode_all(&p, &g, &mut buf);
 
         assert_eq!(read_buffer(&buf).unwrap(), digested);
     }
@@ -1513,7 +1503,7 @@ mod tests {
         }
 
         let mut buf = v3::new_buffer();
-        build_effects_buffer(&p, &g, &mut buf);
+        encode_all(&p, &g, &mut buf);
         assert_eq!(read_buffer(&buf).unwrap().len(), 1, "one shape, one record");
         assert!(
             buf.len() < 130_000,

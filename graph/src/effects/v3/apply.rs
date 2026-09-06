@@ -1396,7 +1396,7 @@ mod tests {
         }
 
         let mut buf = crate::effects::v3::new_buffer();
-        crate::effects::v3::emit::build_effects_buffer(&p, &master, &mut buf);
+        crate::effects::v3::emit::for_each_record(&p, &master, |r| r.encode(&mut buf));
         assert_eq!(
             crate::effects::v3::read_buffer(&buf).unwrap().len(),
             5,
