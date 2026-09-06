@@ -130,7 +130,8 @@ pub struct Pending {
     pub(crate) deleted_nodes: RoaringTreemap,
     /// Relationships to be deleted
     pub(crate) deleted_relationships: RoaringTreemap,
-    /// Endpoints for deleted relationships — populated by commit(), used by build_effects_buffer().
+    /// Endpoints for deleted relationships — populated by commit(), read by the
+    /// effects emitter, which takes a `Pending` and never the other way round.
     pub(crate) deleted_endpoints: Vec<DeletedEdge>,
     /// `(node_id, label_id)` for every deleted node that carried a label —
     /// populated by commit(), used by the effects emitter.

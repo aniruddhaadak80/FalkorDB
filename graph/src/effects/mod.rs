@@ -148,10 +148,10 @@ pub(crate) trait EffectsFormat<const VERSION: u8> {
     /// there.
     ///
     /// Returns how many records were written.
-    fn build(
+    fn build<W: EffectWrite + ?Sized>(
         pending: &Pending,
         graph: &AtomicRefCell<Graph>,
-        buf: &mut dyn EffectWrite,
+        buf: &mut W,
     ) -> u64;
 
     /// Append one index DDL statement.
@@ -160,12 +160,12 @@ pub(crate) trait EffectsFormat<const VERSION: u8> {
     ///
     /// Returns an error if the statement names a label or property this graph
     /// has not registered, which would mean the DDL did not run.
-    fn build_index(
+    fn build_index<W: EffectWrite + ?Sized>(
         pending: &Pending,
         graph: &AtomicRefCell<Graph>,
         create: bool,
         index: &AnnouncedIndex<'_>,
-        buf: &mut dyn EffectWrite,
+        buf: &mut W,
     ) -> Result<(), String>;
 
     /// Append one constraint statement, with the status this node reached.
@@ -174,12 +174,12 @@ pub(crate) trait EffectsFormat<const VERSION: u8> {
     ///
     /// Returns an error if a property is not registered, which would mean
     /// `create_constraint` did not run or did not register it.
-    fn build_constraint(
+    fn build_constraint<W: EffectWrite + ?Sized>(
         graph: &Graph,
         create: bool,
         constraint: &AnnouncedConstraint<'_>,
         baseline: &SchemaBaseline,
-        buf: &mut dyn EffectWrite,
+        buf: &mut W,
     ) -> Result<(), String>;
 }
 
@@ -303,9 +303,9 @@ impl EffectsPayload {
 /// same reason the RDB traits grow `encode_with_range` / `decode_with_count`
 /// rather than folding counts into `encode`.
 pub trait EffectEncode<const VERSION: u8> {
-    fn encode(
+    fn encode<W: EffectWrite + ?Sized>(
         &self,
-        buf: &mut dyn EffectWrite,
+        buf: &mut W,
     );
 }
 

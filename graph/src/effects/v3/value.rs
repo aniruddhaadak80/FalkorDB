@@ -28,9 +28,9 @@ use super::{DecodeError, EffectDecode, EffectEncode, EffectWrite, Reader, T_MAP,
 ///
 /// `T_NULL` has no payload at all — not a zero byte.
 impl EffectEncode<3> for Value {
-    fn encode(
+    fn encode<W: EffectWrite + ?Sized>(
         &self,
-        buf: &mut dyn EffectWrite,
+        buf: &mut W,
     ) {
         match self {
             Value::Null => write_tag(buf, si_type::T_NULL),

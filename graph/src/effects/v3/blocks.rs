@@ -11,8 +11,8 @@ use super::{DecodeError, EffectDecode, EffectEncode, EffectWrite, Reader};
 // ── RelType ──
 
 /// `RelType` — one relationship id per record, part of the partition key.
-pub fn write_rel_type(
-    buf: &mut dyn EffectWrite,
+pub fn write_rel_type<W: EffectWrite + ?Sized>(
+    buf: &mut W,
     relation_id: u32,
 ) {
     buf.schema_id(relation_id);
@@ -30,8 +30,8 @@ pub fn read_rel_type(r: &mut Reader<'_>) -> Result<u32, DecodeError> {
 /// Always plain, never roaring: roaring's 27–30 byte floor exceeds the whole
 /// block until roughly seven labels, and the block is already amortised over
 /// every row in the record.
-pub fn write_label_set(
-    buf: &mut dyn EffectWrite,
+pub fn write_label_set<W: EffectWrite + ?Sized>(
+    buf: &mut W,
     labels: &[u32],
 ) {
     // Count and payload together, before either is written: the exact size is
@@ -63,8 +63,8 @@ pub fn read_label_set(r: &mut Reader<'_>) -> Result<Vec<u32>, DecodeError> {
 /// reader can then resolve and verify the schema against its own dictionaries
 /// before it touches a single row, instead of discovering a divergence halfway
 /// through applying one.
-pub fn write_attr_ids(
-    buf: &mut dyn EffectWrite,
+pub fn write_attr_ids<W: EffectWrite + ?Sized>(
+    buf: &mut W,
     attr_ids: &[u16],
 ) {
     buf.reserve(2 + attr_ids.len() * 2);
@@ -100,8 +100,8 @@ pub fn read_attr_ids(r: &mut Reader<'_>) -> Result<Vec<u16>, DecodeError> {
 /// Rows stay row-major. Grouping values by attribute instead saves zero bytes
 /// uncompressed and changes sign with the data once compressed, which does not
 /// justify a second layout two engines must match byte-for-byte.
-pub fn write_attr_values(
-    buf: &mut dyn EffectWrite,
+pub fn write_attr_values<W: EffectWrite + ?Sized>(
+    buf: &mut W,
     rows: &[Value],
 ) {
     // A floor, not the size: a value is at least its 4-byte type tag, and most

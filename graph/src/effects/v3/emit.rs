@@ -102,12 +102,12 @@ pub fn emit_schema_additions(
 ///
 /// Returns an error if a property is not registered, which would mean
 /// `create_constraint` did not run or did not register it.
-pub fn build_constraint_buffer(
+pub fn build_constraint_buffer<W: EffectWrite + ?Sized>(
     g: &Graph,
     create: bool,
     c: &AnnouncedConstraint<'_>,
     baseline: &SchemaBaseline,
-    buf: &mut dyn EffectWrite,
+    buf: &mut W,
 ) -> Result<(), String> {
     let AnnouncedConstraint {
         ct,
@@ -174,12 +174,12 @@ const fn index_field_flags(t: &IndexType) -> u32 {
 /// index-level options belong to the index and cannot be set twice. `field_type`
 /// therefore sits at the statement level — a drop sends an empty field list, and
 /// a per-field type would vanish along with the fields.
-pub fn build_index_buffer(
+pub fn build_index_buffer<W: EffectWrite + ?Sized>(
     p: &Pending,
     g: &AtomicRefCell<Graph>,
     create: bool,
     ix: &AnnouncedIndex<'_>,
-    buf: &mut dyn EffectWrite,
+    buf: &mut W,
 ) -> Result<(), String> {
     let g = &g.borrow();
     // Derived here rather than by the caller, for the same reason
@@ -240,10 +240,10 @@ type Shape = (Vec<u32>, Vec<u16>);
 /// Appends to `buf`, which arrives already framed — see
 /// [`crate::effects::EffectsBuffer`], which is the only thing that makes one
 /// and the only caller of this.
-pub fn build_effects_buffer(
+pub fn build_effects_buffer<W: EffectWrite + ?Sized>(
     p: &Pending,
     g: &AtomicRefCell<Graph>,
-    buf: &mut dyn EffectWrite,
+    buf: &mut W,
 ) -> u64 {
     let mut n = 0;
     for_each_record(p, g, |record| {

@@ -112,30 +112,30 @@ impl EffectsFormat<EFFECTS_VERSION> for EffectsPayload {
         apply_effects(graph, buf)
     }
 
-    fn build(
+    fn build<W: EffectWrite + ?Sized>(
         pending: &Pending,
         graph: &AtomicRefCell<Graph>,
-        buf: &mut dyn EffectWrite,
+        buf: &mut W,
     ) -> u64 {
         build_effects_buffer(pending, graph, buf)
     }
 
-    fn build_index(
+    fn build_index<W: EffectWrite + ?Sized>(
         pending: &Pending,
         graph: &AtomicRefCell<Graph>,
         create: bool,
         index: &AnnouncedIndex<'_>,
-        buf: &mut dyn EffectWrite,
+        buf: &mut W,
     ) -> Result<(), String> {
         build_index_buffer(pending, graph, create, index, buf)
     }
 
-    fn build_constraint(
+    fn build_constraint<W: EffectWrite + ?Sized>(
         graph: &Graph,
         create: bool,
         constraint: &AnnouncedConstraint<'_>,
         baseline: &SchemaBaseline,
-        buf: &mut dyn EffectWrite,
+        buf: &mut W,
     ) -> Result<(), String> {
         build_constraint_buffer(graph, create, constraint, baseline, buf)
     }

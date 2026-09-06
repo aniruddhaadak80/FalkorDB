@@ -74,7 +74,7 @@ pub const EFFECTS_VERSION: u8 = 3;
 pub mod apply;
 pub mod blocks;
 // Not `pub`: `EffectsBuffer` is the only door in. The emitter is handed a sink
-// — `&mut dyn EffectWrite` — never a buffer, so there is nothing for a caller
+// — `&mut impl EffectWrite` — never a buffer, so there is nothing for a caller
 // outside to supply even if it could reach these.
 pub(crate) mod emit;
 pub mod format;
@@ -340,8 +340,8 @@ const fn narrow_flag(v: u64) -> u32 {
 /// each one is named once, at its definition in `si_type`, so there is no second
 /// copy to drift. The assertion is what stands between a wider C constant and a
 /// silently truncated tag.
-pub fn write_tag(
-    buf: &mut dyn EffectWrite,
+pub fn write_tag<W: EffectWrite + ?Sized>(
+    buf: &mut W,
     v: u64,
 ) {
     buf.u32(u32::try_from(v).expect("a C constant must fit the 4 bytes the wire reads"));

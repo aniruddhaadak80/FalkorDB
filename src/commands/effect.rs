@@ -1,9 +1,10 @@
 //! `GRAPH.EFFECT` command handler.
 //!
 //! Applies serialized effects (mutations) received from the primary to
-//! maintain replica consistency.  The binary effects buffer is produced
-//! by `Pending::build_effects_buffer()` on the primary and contains the
-//! exact mutations that occurred during query execution.
+//! maintain replica consistency. The payload is built on the primary by
+//! `CommitOp`, once per commit, into the query's one
+//! [`graph::effects::EffectsBuffer`], and carries the exact mutations that
+//! commit made.
 //!
 //! ## Command syntax
 //! ```text

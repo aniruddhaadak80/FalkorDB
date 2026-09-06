@@ -15,8 +15,8 @@ use super::*;
 /// repeated. `count == 1` and `count == 10_000` are the same record, which is
 /// why no record type is left un-batchable and the decoder has one shape per
 /// opcode.
-fn write_header(
-    buf: &mut dyn EffectWrite,
+fn write_header<W: EffectWrite + ?Sized>(
+    buf: &mut W,
     opcode: Opcode,
     count: Option<u32>,
 ) {
@@ -62,8 +62,8 @@ pub struct AttrRef<S> {
 /// and a caller's borrowed `AttrRef<&str>` both go through it. The dispatch
 /// used to collect the owned ones into a borrowed `Vec` per index record —
 /// an allocation to satisfy a signature.
-fn write_index_fields<S: AsRef<str>>(
-    buf: &mut dyn EffectWrite,
+fn write_index_fields<S: AsRef<str>, W: EffectWrite + ?Sized>(
+    buf: &mut W,
     fields: &[AttrRef<S>],
 ) {
     // Floor: 2 bytes of id and an 8-byte length per field, the same minimum
@@ -365,9 +365,9 @@ pub fn read_record(r: &mut Reader<'_>) -> Result<Record, DecodeError> {
 /// nothing checking that they did. Two adjacent `&[u32]` arguments transpose
 /// silently; two named fields do not.
 impl EffectEncode<3> for Record {
-    fn encode(
+    fn encode<W: EffectWrite + ?Sized>(
         &self,
-        buf: &mut dyn EffectWrite,
+        buf: &mut W,
     ) {
         match self {
             // `9 ADD_SCHEMA` — `SchemaType · LabelID|RelationID · name`.

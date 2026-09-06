@@ -517,9 +517,9 @@ impl Segment {
     }
 
     /// The header byte, then whatever the variant needs.
-    fn encode(
+    fn encode<W: EffectWrite + ?Sized>(
         &self,
-        buf: &mut dyn EffectWrite,
+        buf: &mut W,
     ) {
         match self {
             Self::Range { base, len } => {
@@ -551,8 +551,8 @@ impl Segment {
 
     /// `Range` and `Repeat` are the same three fields — a kind, a value and a
     /// count — so they share a writer rather than drifting apart.
-    fn write_pair(
-        buf: &mut dyn EffectWrite,
+    fn write_pair<W: EffectWrite + ?Sized>(
+        buf: &mut W,
         kind: u8,
         value: u64,
         count: u64,
@@ -859,9 +859,9 @@ impl IdList {
     ///
     /// Nothing is decided here. The segments already are the encoding, so this
     /// is a straight write of what the pushes built.
-    pub fn encode(
+    pub fn encode<W: EffectWrite + ?Sized>(
         &self,
-        buf: &mut dyn EffectWrite,
+        buf: &mut W,
     ) {
         // Both the segment count and every segment's length are stated, and for
         // the same reason: a list has to be well-formed on its own, not only in
@@ -954,8 +954,8 @@ impl From<&[u64]> for IdList {
 }
 
 /// Write `value` at a fixed width, little-endian.
-fn write_narrow(
-    buf: &mut dyn EffectWrite,
+fn write_narrow<W: EffectWrite + ?Sized>(
+    buf: &mut W,
     value: u64,
     width: u8,
 ) {
