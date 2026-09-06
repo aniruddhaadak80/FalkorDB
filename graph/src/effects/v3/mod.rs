@@ -73,7 +73,12 @@ pub const EFFECTS_VERSION: u8 = 3;
 
 pub mod apply;
 pub mod blocks;
-pub mod emit;
+// Not `pub`: these take a `&mut Vec<u8>` because inside the format the bytes
+// *are* a `Vec` — that is what `EffectsBuffer` wraps, and `&mut self.0` is how
+// a newtype delegates. The parameter is only dangerous when someone outside
+// can supply it, which is how the host came to build announcement payloads
+// with a bare `Vec::new()`. Now it cannot: `EffectsBuffer` is the only door in.
+pub(crate) mod emit;
 pub mod format;
 mod id_list;
 pub mod records;

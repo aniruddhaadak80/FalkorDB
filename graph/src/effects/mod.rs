@@ -70,7 +70,8 @@ pub trait ReplicationSink {
 /// for EffectsPayload` beside the v3 impl and the compiler picks between them,
 /// rather than a module name a caller has to spell.
 ///
-/// Nothing outside this module implements or names it. The entry points are
+/// Nothing outside this crate implements or names it, and `pub(crate)` is
+/// what says so — the sentence used to be a claim the compiler did not check. The entry points are
 /// [`EffectsBuffer`]'s methods for writing and [`EffectsPayload`]'s for
 /// reading, and it is the reading side that decides *which* version applies —
 /// that decision is the whole reason the parameter is not a marker type.
@@ -80,7 +81,7 @@ pub trait ReplicationSink {
 /// produced a payload compressed twice that could not be read at all — and the
 /// way to make that unrepeatable is to give no caller the option.
 /// [`Self::replicate`] takes the buffer by value and is the only exit.
-pub trait EffectsFormat<const VERSION: u8> {
+pub(crate) trait EffectsFormat<const VERSION: u8> {
     /// A new payload: framed, and holding no records.
     ///
     /// The buffer originates here rather than at a caller. It used to arrive
