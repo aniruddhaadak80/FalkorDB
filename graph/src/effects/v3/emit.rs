@@ -301,8 +301,14 @@ pub fn for_each_record(
 /// codec benchmarks need the records as values — to assert on their shape, or
 /// to time encoding separately from digesting — and reconstructing them by
 /// decoding a buffer would test the decoder rather than the digest.
+///
+/// `#[cfg(test)]`, which is also what the codec benchmarks compile under: this
+/// crate keeps its benches inside `src` as `#[cfg(test)] mod *_bench` — see
+/// `graph/src/graph/graphblas/degree_bench.rs` and its three neighbours — so a
+/// bench sees this without it having to be public to the workspace.
+#[cfg(test)]
 #[must_use]
-pub fn digest(
+pub(crate) fn digest(
     p: &Pending,
     g: &AtomicRefCell<Graph>,
 ) -> Vec<Record> {
