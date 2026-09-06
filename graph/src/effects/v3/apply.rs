@@ -1395,7 +1395,7 @@ mod tests {
             p.stage_created_node(id, &[0], &[(0, Value::Int(id as i64))]);
         }
 
-        let mut buf = Vec::new();
+        let mut buf = crate::effects::v3::new_buffer();
         crate::effects::v3::emit::build_effects_buffer(&p, &master, &mut buf);
         assert_eq!(
             crate::effects::v3::read_buffer(&buf).unwrap().len(),

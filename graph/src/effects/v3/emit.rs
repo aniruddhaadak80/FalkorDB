@@ -137,9 +137,6 @@ pub fn build_constraint_buffer(
         })
         .collect::<Result<_, _>>()?;
 
-    if buf.is_empty() {
-        buf.extend_from_slice(&v3::new_buffer());
-    }
     emit_schema_additions(g, baseline, &mut |record| record.encode(buf));
     // Through `Record`, like everything else. This was the one production path
     // that reached past the pivot into a record writer, which is also why it
@@ -215,9 +212,6 @@ pub fn build_index_buffer(
         })
         .collect::<Result<_, _>>()?;
 
-    if buf.is_empty() {
-        buf.extend_from_slice(&v3::new_buffer());
-    }
     emit_schema_additions(g, baseline, &mut |record| record.encode(buf));
     Record::Index {
         create,
@@ -242,20 +236,14 @@ type Shape = (Vec<u32>, Vec<u16>);
 ///
 /// Digest, then encode. Returns the number of records written.
 ///
-/// Appends to `buf` rather than returning a fresh one because a query can
-/// commit more than once — `Optional`, `Union`, `Apply`, `Merge` and `ForEach`
-/// all re-enter `run_batch` — and every commit's records belong to the one
-/// `GRAPH.EFFECT` the query replicates. The buffer therefore outlives any one
-/// call and lives on the runtime.
+/// Appends to `buf`, which arrives already framed — see
+/// [`crate::effects::EffectsBuffer`], which is the only thing that makes one
+/// and the only caller of this.
 pub fn build_effects_buffer(
     p: &Pending,
     g: &AtomicRefCell<Graph>,
     buf: &mut Vec<u8>,
 ) -> u64 {
-    if buf.is_empty() {
-        // Through new_buffer, so the flags byte cannot be forgotten here.
-        buf.extend_from_slice(&v3::new_buffer());
-    }
     let mut n = 0;
     for_each_record(p, g, |record| {
         record.encode(buf);
@@ -791,7 +779,7 @@ mod tests {
             .into_iter()
             .collect(),
         ));
-        let mut buf = Vec::new();
+        let mut buf = v3::new_buffer();
         // A default `Pending` carries zero schema counts, so the label and the
         // attribute are announced ahead of the record that names their ids.
         build_index_buffer(
@@ -834,7 +822,7 @@ mod tests {
         // numbering, so an unresolvable name must not become a guessed id.
         let g = graph();
         let fields = vec![Arc::new(String::from("nope"))];
-        let mut buf = Vec::new();
+        let mut buf = v3::new_buffer();
         let err = build_index_buffer(
             &Pending::default(),
             &g,
@@ -844,8 +832,9 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("is not registered"), "{err}");
-        assert!(
-            buf.is_empty(),
+        assert_eq!(
+            buf,
+            v3::new_buffer(),
             "nothing may be written before the ids resolve"
         );
     }
@@ -876,7 +865,7 @@ mod tests {
         p: &Pending,
         g: &AtomicRefCell<Graph>,
     ) -> Vec<Record> {
-        let mut buf = Vec::new();
+        let mut buf = v3::new_buffer();
         build_effects_buffer(p, g, &mut buf);
         read_buffer(&buf).expect("v3 buffer must decode")
     }
@@ -1289,9 +1278,9 @@ mod tests {
             backward.stage_created_node(id, &[], &[((id % 2) as u16, Value::Int(id as i64))]);
         }
 
-        let mut a = Vec::new();
+        let mut a = v3::new_buffer();
         build_effects_buffer(&forward, &g, &mut a);
-        let mut b = Vec::new();
+        let mut b = v3::new_buffer();
         build_effects_buffer(&backward, &g, &mut b);
         assert_eq!(a, b, "insertion order must not reach the wire");
     }
@@ -1477,7 +1466,7 @@ mod tests {
         p.stage_label_change(600, &[0]);
 
         let digested = digest(&p, &g);
-        let mut buf = Vec::new();
+        let mut buf = v3::new_buffer();
         build_effects_buffer(&p, &g, &mut buf);
 
         assert_eq!(read_buffer(&buf).unwrap(), digested);
@@ -1521,7 +1510,7 @@ mod tests {
             p.stage_created_node(id, &[0], &[(0, Value::Int(id as i64))]);
         }
 
-        let mut buf = Vec::new();
+        let mut buf = v3::new_buffer();
         build_effects_buffer(&p, &g, &mut buf);
         assert_eq!(read_buffer(&buf).unwrap().len(), 1, "one shape, one record");
         assert!(

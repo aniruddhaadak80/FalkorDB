@@ -12,11 +12,17 @@ use super::{
     EFFECTS_VERSION, FLAG_COMPRESSED, apply::ApplyError, apply::apply_effects, open_payload, seal,
 };
 use crate::effects::announce::{AnnouncedConstraint, AnnouncedIndex, SchemaBaseline};
+use crate::effects::v3;
 use crate::effects::{EffectsFormat, EffectsPayload, ReplicationSink};
 use crate::graph::graph::Graph;
 use crate::runtime::pending::Pending;
 
 impl EffectsFormat<EFFECTS_VERSION> for EffectsPayload {
+    fn new_buffer() -> Vec<u8> {
+        // Through `v3::new_buffer`, so the flags byte cannot be forgotten.
+        v3::new_buffer()
+    }
+
     fn is_empty(buf: &[u8]) -> bool {
         // `u8 version` + `u8 flags`, and nothing after them.
         buf.len() <= HEADER_LEN

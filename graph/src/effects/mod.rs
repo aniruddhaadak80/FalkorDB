@@ -71,8 +71,9 @@ pub trait ReplicationSink {
 /// rather than a module name a caller has to spell.
 ///
 /// Nothing outside this module implements or names it. The entry points are
-/// [`EffectsPayload`]'s inherent methods, which decide *which* version applies
-/// — and that decision is the whole reason the parameter is not a marker type.
+/// [`EffectsBuffer`]'s methods for writing and [`EffectsPayload`]'s for
+/// reading, and it is the reading side that decides *which* version applies —
+/// that decision is the whole reason the parameter is not a marker type.
 ///
 /// Note what is **not** here: a way to finish a payload without sending it.
 /// Finishing has to happen exactly once and last — running it per commit
@@ -80,6 +81,16 @@ pub trait ReplicationSink {
 /// way to make that unrepeatable is to give no caller the option.
 /// [`Self::replicate`] takes the buffer by value and is the only exit.
 pub trait EffectsFormat<const VERSION: u8> {
+    /// A new payload: framed, and holding no records.
+    ///
+    /// The buffer originates here rather than at a caller. It used to arrive
+    /// as a bare `Vec::new()` from whoever wanted to write into it, which left
+    /// every builder below opening with `if buf.is_empty() { …header… }` — the
+    /// framing decided three times over, from a `Vec`'s length, by code that
+    /// had no other business knowing a header existed. A buffer with junk in
+    /// it would have been appended to and shipped unframed.
+    fn new_buffer() -> Vec<u8>;
+
     /// True for a payload that carries no records — a bare header.
     ///
     /// What "bare" means is the format's, because how long a header is belongs
@@ -195,74 +206,15 @@ const DESCRIBE_BYTE_LIMIT: usize = 2048;
 /// log message.
 const DESCRIBE_BYTES_PER_LINE: usize = 32;
 
-/// A `GRAPH.EFFECT` payload, whatever version it is in.
+/// A `GRAPH.EFFECT` payload that arrived, whatever version it is in.
 ///
-/// The one type the rest of the codebase names. Its methods pick the format:
-/// writing is always [`WIRE_VERSION`], and reading is whatever the buffer
-/// declares in its first byte.
+/// The read side. Which format applies is whatever the buffer declares in its
+/// first byte, because the sender is a different process on a different build.
+/// The write side is [`EffectsBuffer`], where the version is not a question:
+/// this build writes [`WIRE_VERSION`].
 pub struct EffectsPayload;
 
 impl EffectsPayload {
-    /// True for a payload this build would have written that carries no
-    /// records.
-    ///
-    /// About a buffer *being built here*, so it asks the version being written
-    /// rather than reading a header that is not there yet.
-    #[must_use]
-    pub fn is_empty(buf: &[u8]) -> bool {
-        <Self as EffectsFormat<WIRE_VERSION>>::is_empty(buf)
-    }
-
-    /// Digest a committed write, in the version this build writes.
-    pub fn build(
-        pending: &Pending,
-        graph: &AtomicRefCell<Graph>,
-        buf: &mut Vec<u8>,
-    ) -> u64 {
-        <Self as EffectsFormat<WIRE_VERSION>>::build(pending, graph, buf)
-    }
-
-    /// Append one index DDL statement, in the version this build writes.
-    ///
-    /// # Errors
-    ///
-    /// Whatever the format reports — see [`EffectsFormat::build_index`].
-    pub fn build_index(
-        pending: &Pending,
-        graph: &AtomicRefCell<Graph>,
-        create: bool,
-        index: &AnnouncedIndex<'_>,
-        buf: &mut Vec<u8>,
-    ) -> Result<(), String> {
-        <Self as EffectsFormat<WIRE_VERSION>>::build_index(pending, graph, create, index, buf)
-    }
-
-    /// Append one constraint statement, in the version this build writes.
-    ///
-    /// # Errors
-    ///
-    /// Whatever the format reports — see [`EffectsFormat::build_constraint`].
-    pub fn build_constraint(
-        graph: &Graph,
-        create: bool,
-        constraint: &AnnouncedConstraint<'_>,
-        baseline: &SchemaBaseline,
-        buf: &mut Vec<u8>,
-    ) -> Result<(), String> {
-        <Self as EffectsFormat<WIRE_VERSION>>::build_constraint(
-            graph, create, constraint, baseline, buf,
-        )
-    }
-
-    /// Finish a payload and send it, in the version this build writes.
-    pub fn replicate(
-        sink: &dyn ReplicationSink,
-        key: &[u8],
-        buf: Vec<u8>,
-    ) {
-        <Self as EffectsFormat<WIRE_VERSION>>::replicate(sink, key, buf);
-    }
-
     /// Describe a payload for a divergence report: what it says, then the
     /// bytes it arrived as.
     ///
@@ -362,6 +314,114 @@ pub trait EffectDecode<const VERSION: u8>: Sized {
     /// Returns [`DecodeError`] if the bytes are malformed, truncated, or
     /// describe a shape this version does not have.
     fn decode(r: &mut Reader<'_>) -> Result<Self, DecodeError>;
+}
+
+/// A payload being built, in the version this build writes.
+///
+/// The write-side counterpart to [`EffectsPayload`], which is about a payload
+/// that *arrived*. Both are needed and they are not the same thing: one is a
+/// buffer this node is appending to and will eventually send, the other is a
+/// slice some other node sent, whose version is whatever it says it is.
+///
+/// A `Vec<u8>` was standing in for this. That made the framing something each
+/// builder had to notice was missing, let the host hand over a buffer it had
+/// made itself, and gave anything holding one the ability to append arbitrary
+/// bytes to a payload. There is no constructor here that does not frame it,
+/// and no way to reach the bytes except by sending them.
+///
+/// Accumulating rather than one-shot on purpose: a query can commit more than
+/// once — `Optional`, `Union`, `Apply`, `Merge` and `ForEach` all re-enter
+/// `run_batch` — and every commit's records belong to the single
+/// `GRAPH.EFFECT` that query replicates. So the buffer outlives any one build
+/// call and lives on the runtime; what it must not do is originate there.
+pub struct EffectsBuffer(Vec<u8>);
+
+impl Default for EffectsBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EffectsBuffer {
+    /// A new payload, framed by the format and holding no records.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(<EffectsPayload as EffectsFormat<WIRE_VERSION>>::new_buffer())
+    }
+
+    /// True while this payload carries no records — a bare header.
+    ///
+    /// Asks the version being *written*, not one read off the bytes: the
+    /// header here is one this build just put there.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        <EffectsPayload as EffectsFormat<WIRE_VERSION>>::is_empty(&self.0)
+    }
+
+    /// Digest a committed write into this payload.
+    ///
+    /// Returns how many records it added.
+    pub fn build(
+        &mut self,
+        pending: &Pending,
+        graph: &AtomicRefCell<Graph>,
+    ) -> u64 {
+        <EffectsPayload as EffectsFormat<WIRE_VERSION>>::build(pending, graph, &mut self.0)
+    }
+
+    /// Append one index DDL statement.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the format reports — see [`EffectsFormat::build_index`].
+    pub fn build_index(
+        &mut self,
+        pending: &Pending,
+        graph: &AtomicRefCell<Graph>,
+        create: bool,
+        index: &AnnouncedIndex<'_>,
+    ) -> Result<(), String> {
+        <EffectsPayload as EffectsFormat<WIRE_VERSION>>::build_index(
+            pending,
+            graph,
+            create,
+            index,
+            &mut self.0,
+        )
+    }
+
+    /// Append one constraint statement.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the format reports — see [`EffectsFormat::build_constraint`].
+    pub fn build_constraint(
+        &mut self,
+        graph: &Graph,
+        create: bool,
+        constraint: &AnnouncedConstraint<'_>,
+        baseline: &SchemaBaseline,
+    ) -> Result<(), String> {
+        <EffectsPayload as EffectsFormat<WIRE_VERSION>>::build_constraint(
+            graph,
+            create,
+            constraint,
+            baseline,
+            &mut self.0,
+        )
+    }
+
+    /// Finish this payload and send it as one `GRAPH.EFFECT` under `key`.
+    ///
+    /// By value: finishing happens once and last, and a finished payload has
+    /// no second use. This is the only way the bytes leave.
+    pub fn replicate(
+        self,
+        sink: &dyn ReplicationSink,
+        key: &[u8],
+    ) {
+        <EffectsPayload as EffectsFormat<WIRE_VERSION>>::replicate(sink, key, self.0);
+    }
 }
 
 /// The one thing left that names a version, and it is configuration rather

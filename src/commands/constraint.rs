@@ -4,7 +4,7 @@ use crate::{
     graph_core::{CtxSink, ThreadedGraph, c_graph_key, c_graph_name, ffi, register_graph},
     redis_type::GRAPH_TYPE,
 };
-use graph::effects::EffectsPayload;
+use graph::effects::EffectsBuffer;
 use graph::effects::announce::{AnnouncedConstraint, SchemaBaseline};
 use graph::entity_type::EntityType;
 use graph::graph::constraint::{ConstraintStatus, ConstraintType};
@@ -253,13 +253,13 @@ fn attempt_settle(
                 else {
                     continue;
                 };
-                let mut buf = Vec::new();
+                let mut buf = EffectsBuffer::new();
                 // Re-announce with the status validation settled on. The GIL is
                 // still held here, from `upgrade_to_write`'s pause check
                 // through this replicate, which is what keeps the check sound:
                 // the propagation is flushed when the session's guard releases
                 // it, inside the window the check validated.
-                match EffectsPayload::build_constraint(
+                match buf.build_constraint(
                     &g,
                     true,
                     &AnnouncedConstraint {
@@ -270,9 +270,8 @@ fn attempt_settle(
                         properties: &c.properties,
                     },
                     &SchemaBaseline::of(&g),
-                    &mut buf,
                 ) {
-                    Ok(()) => EffectsPayload::replicate(&CtxSink(ctx), key.as_bytes(), buf),
+                    Ok(()) => buf.replicate(&CtxSink(ctx), key.as_bytes()),
                     // Swallowing this left the replica's constraint UNDER
                     // CONSTRUCTION permanently: the master has settled it, the
                     // announcement that would carry that never went out, and
@@ -527,8 +526,8 @@ pub fn graph_constraint(
                             .expect("a create leaves its constraint in place"),
                     )
                 };
-                let mut buf = Vec::new();
-                match EffectsPayload::build_constraint(
+                let mut buf = EffectsBuffer::new();
+                match buf.build_constraint(
                     &mutated.borrow(),
                     is_create,
                     &AnnouncedConstraint {
@@ -539,10 +538,9 @@ pub fn graph_constraint(
                         properties: &properties,
                     },
                     &baseline,
-                    &mut buf,
                 ) {
                     Ok(()) => {
-                        EffectsPayload::replicate(&CtxSink(ctx), key_str.as_slice(), buf);
+                        buf.replicate(&CtxSink(ctx), key_str.as_slice());
                     }
                     // The write has already committed, so there is nothing to
                     // undo and an error reply would be a lie — the constraint

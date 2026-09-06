@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use crate::parser::ast::{QueryExpr, Variable};
 use crate::{
-    effects::{EffectsPayload, announce::AnnouncedIndex},
+    effects::{EffectsBuffer, announce::AnnouncedIndex},
     entity_type::EntityType,
     index::indexer::IndexType,
     runtime::{
@@ -121,8 +121,8 @@ fn emit_effect(
         return Ok(());
     }
     let mut buf_ref = runtime.effects_buffer.borrow_mut();
-    let buf = buf_ref.get_or_insert_with(Vec::new);
-    EffectsPayload::build_index(
+    let buf = buf_ref.get_or_insert_with(EffectsBuffer::new);
+    buf.build_index(
         &runtime.pending.borrow(),
         &runtime.g,
         create,
@@ -133,7 +133,6 @@ fn emit_effect(
             fields: attrs,
             options,
         },
-        buf,
     )?;
     runtime.effects_count.set(runtime.effects_count.get() + 1);
     Ok(())

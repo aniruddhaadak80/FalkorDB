@@ -37,6 +37,7 @@
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_precision_loss)]
+use crate::effects::EffectsBuffer;
 use crate::{
     graph::graph::{Graph, NodeId, RelationshipId},
     identifier_limits::validate_identifier_len,
@@ -171,7 +172,7 @@ pub struct Runtime<'a> {
     /// Maximum number of result rows to return. Negative means unlimited.
     pub result_set_size: i64,
     /// Effects buffer built before commit, for replication.
-    pub effects_buffer: RefCell<Option<Vec<u8>>>,
+    pub effects_buffer: RefCell<Option<EffectsBuffer>>,
     /// Total number of effect records across all commits in this query.
     pub effects_count: Cell<u64>,
     /// Whether commits should serialize an effects buffer.

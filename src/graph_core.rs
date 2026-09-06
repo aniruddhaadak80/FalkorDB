@@ -45,7 +45,7 @@ use crossfire::{
 };
 use graph::{
     effects::payload::take_effects_buffer,
-    effects::{EffectsPayload, ReplicationSink},
+    effects::{EffectsBuffer, ReplicationSink},
     graph::{
         graph::{Graph, Plan},
         mvcc_graph::MvccGraph,
@@ -237,7 +237,7 @@ pub struct WriteMessage {
 /// What `commit_and_replicate` needs to publish a finished write.
 struct WriteQueryOk {
     graph: Arc<AtomicRefCell<Graph>>,
-    effects_buffer: Option<Vec<u8>>,
+    effects_buffer: Option<EffectsBuffer>,
     modified: bool,
 }
 
@@ -1510,7 +1510,7 @@ fn commit_and_replicate(
     // index DDL is in — and that timing is the only thing this module knows
     // about it. What the bytes are, and what still has to happen to them, is
     // the format's.
-    EffectsPayload::replicate(&CtxSink(ctx), key_name.as_bytes(), buf);
+    buf.replicate(&CtxSink(ctx), key_name.as_bytes());
 }
 
 pub fn process_write_queued_query(graph: &Arc<RwLock<ThreadedGraph>>) {
