@@ -119,6 +119,19 @@ fn lookup_sorted(
 /// costing a struct and a constructor per wire format. What states that surface
 /// now is `effects_v3_emit::digest`, whose return type says precisely what
 /// replication makes of this.
+/// A node created and then deleted before the transaction committed.
+///
+/// Its labels and attributes are kept because the effects buffer describes it
+/// as a create followed by a delete, and the create has to carry the shape the
+/// master would have given it — that is what makes the payload the same records
+/// C emits for the same query.
+#[derive(Clone, Debug)]
+pub(crate) struct CancelledNode {
+    pub(crate) id: u64,
+    pub(crate) labels: Vec<u64>,
+    pub(crate) attrs: Vec<(u16, Value)>,
+}
+
 pub struct Pending {
     /// Nodes created in this transaction
     pub(crate) created_nodes: RoaringTreemap,
@@ -143,6 +156,19 @@ pub struct Pending {
     /// exact vector, so keeping it costs a move, while grouping would charge
     /// every delete for a partitioning only a replicating server reads.
     pub(crate) deleted_node_labels: Vec<DeletedNodeLabel>,
+    /// Nodes created and deleted inside one segment, which the graph never
+    /// sees.
+    ///
+    /// `delete_pending_node` unwinds such a node out of `created_nodes` and
+    /// `return_node_id` hands its id straight back to the recycle bin, so the
+    /// master's id space acquires a hole that no create and no delete
+    /// describes. Replicating nothing for it left the replica's id space one
+    /// short, and its next allocation after a promotion landed on a live node.
+    ///
+    /// Kept here so the effects emitter can say what happened — a create and a
+    /// delete, which is what C's payload carries for the same query — without
+    /// the master having to do the work it deliberately skips.
+    pub(crate) cancelled_nodes: Vec<CancelledNode>,
     /// Property updates for newly created nodes (fast path: skip fjall).
     /// Values are attribute-id-resolved, sorted by id, unique.
     pub(crate) new_nodes_attrs: FxHashMap<u64, Vec<(u16, Value)>>,
@@ -319,6 +345,7 @@ impl Pending {
             deleted_relationships: RoaringTreemap::new(),
             deleted_endpoints: Vec::new(),
             deleted_node_labels: Vec::new(),
+            cancelled_nodes: Vec::new(),
             new_nodes_attrs: FxHashMap::default(),
             existing_nodes_attrs: FxHashMap::default(),
             new_relationships_attrs: FxHashMap::default(),
@@ -597,6 +624,14 @@ impl Pending {
             .unwrap_or_default();
 
         let rels = self.remove_pending_relationships_for_node(id);
+
+        // The one durable record that this id was ever handed out. Everything
+        // above has just erased it from the structures the graph commits.
+        self.cancelled_nodes.push(CancelledNode {
+            id: id.into(),
+            labels: label_ids.iter().map(|l| l.0 as u64).collect(),
+            attrs: attrs.clone(),
+        });
 
         (label_ids, attrs, rels)
     }
@@ -1498,6 +1533,7 @@ impl Pending {
         self.deleted_relationships.clear();
         self.deleted_endpoints.clear();
         self.deleted_node_labels.clear();
+        self.cancelled_nodes.clear();
         self.index_docs.node_adds.clear();
         self.index_docs.node_removes.clear();
         self.index_docs.edge_adds.clear();

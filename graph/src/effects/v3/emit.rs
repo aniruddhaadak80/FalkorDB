@@ -299,6 +299,71 @@ pub fn for_each_record(
     // Edges before nodes, so the replica unhooks first.
     digest_deleted_edges(p, out);
     digest_deleted_nodes(p, out);
+    digest_cancelled_nodes(p, out);
+}
+
+/// A node created and deleted inside one segment, as the create and the delete
+/// the master skipped.
+///
+/// The master takes a shortcut for these — `delete_pending_node` unwinds the
+/// node out of `Pending` and `return_node_id` hands the id back — so nothing
+/// it commits mentions the id at all. The buffer said nothing either, and the
+/// replica's id space came out one short: its next allocation after a
+/// promotion landed on a node that was already live, fusing two entities.
+///
+/// Emitting the pair is what C's payload carries for the same query — C has no
+/// such shortcut, so its `CREATE (a:A), (b:B) DELETE a` puts two CREATE_NODEs
+/// and a DELETE_NODE on the wire — and it needs no record type v3 does not
+/// already have. The replica creates the node and deletes it, ending with the
+/// id in its recycle bin exactly as the master has it.
+///
+/// Last, and as a pair. A later commit in the same query may reclaim this id
+/// from the bin, and its `CREATE_NODE` is appended after these — so the delete
+/// has to be in the buffer before that create, not merely somewhere in it.
+fn digest_cancelled_nodes(
+    p: &Pending,
+    out: &mut impl FnMut(Record),
+) {
+    if p.cancelled_nodes.is_empty() {
+        return;
+    }
+    // Grouped by shape like any other create, so one cancelled shape is one
+    // record however many nodes share it.
+    let mut groups: FxHashMap<Shape, Vec<&crate::runtime::pending::CancelledNode>> =
+        FxHashMap::default();
+    for n in &p.cancelled_nodes {
+        let mut labels: Vec<u32> = n.labels.iter().map(|&l| schema_id(l as usize)).collect();
+        labels.sort_unstable();
+        labels.dedup();
+        let attr_ids: Vec<u16> = n.attrs.iter().map(|(aid, _)| *aid).collect();
+        groups.entry((labels, attr_ids)).or_default().push(n);
+    }
+
+    for ((labels, attr_ids), mut nodes) in groups {
+        nodes.sort_unstable_by_key(|n| n.id);
+        let ids: IdList = nodes.iter().map(|n| n.id).collect();
+        // The shape's values, row-major, from each node's own attribute list.
+        // Every member has exactly this shape by construction, so no row is
+        // padded — a pad is indistinguishable from a removal.
+        let mut rows = Vec::with_capacity(nodes.len() * attr_ids.len());
+        for n in &nodes {
+            for &attr_id in &attr_ids {
+                let v = n
+                    .attrs
+                    .iter()
+                    .find(|(aid, _)| *aid == attr_id)
+                    .map_or(Value::Null, |(_, v)| v.clone());
+                rows.push(v);
+            }
+        }
+        out(Record::CreateNode {
+            ids: ids.clone(),
+            labels: labels.clone(),
+            attr_ids,
+            rows,
+        });
+        out(Record::DeleteNode { ids, labels });
+    }
 }
 
 fn digest_created_nodes(
@@ -1459,6 +1524,118 @@ mod tests {
             buf.len() < 130_000,
             "10,000 nodes should encode in ~120 KB, got {}",
             buf.len()
+        );
+    }
+}
+
+#[cfg(test)]
+mod cancelled {
+    use super::*;
+    use crate::effects::v3::staging::StagePending;
+    use crate::effects::v3::test_aux::{digest, graph_cell, with_attrs};
+    use crate::graph::graph::NodeId;
+    use crate::runtime::pending::Pending;
+
+    /// `CREATE (a:A {v:1}), (b:B) DELETE a` — a's id is handed back and the
+    /// master commits nothing for it.
+    fn cancelled(g: &AtomicRefCell<Graph>) -> Pending {
+        let mut p = Pending::default();
+        p.set_schema_baseline(g);
+        p.stage_created_node(0, &[0], &[(0, Value::Int(1))]);
+        p.stage_created_node(1, &[1], &[]);
+        p.delete_pending_node(NodeId::from(0_u64));
+        p
+    }
+
+    #[test]
+    fn a_cancelled_node_is_a_create_and_a_delete() {
+        // Without this the buffer says nothing about id 0, and the replica's
+        // id space comes out one short — its next allocation after a promotion
+        // lands on a live node.
+        let g = graph_cell();
+        with_attrs(&g, &["v"]);
+        {
+            let mut graph = g.borrow_mut();
+            graph.get_label_id_mut("A");
+            graph.get_label_id_mut("B");
+        }
+        let records = digest(&cancelled(&g), &g);
+
+        let create = records
+            .iter()
+            .position(|r| matches!(r, Record::CreateNode { labels, .. } if labels == &[0]))
+            .expect("the cancelled node's create");
+        let delete = records
+            .iter()
+            .position(|r| matches!(r, Record::DeleteNode { .. }))
+            .expect("the cancelled node's delete");
+        assert!(create < delete, "the create has to precede the delete");
+
+        let Record::CreateNode {
+            ids,
+            labels,
+            attr_ids,
+            rows,
+        } = &records[create]
+        else {
+            unreachable!()
+        };
+        assert_eq!(ids.iter().collect::<Vec<_>>(), vec![0]);
+        assert_eq!(labels, &[0], "the shape the master would have given it");
+        assert_eq!(attr_ids, &[0]);
+        assert_eq!(rows, &[Value::Int(1)]);
+
+        let Record::DeleteNode { ids, labels } = &records[delete] else {
+            unreachable!()
+        };
+        assert_eq!(ids.iter().collect::<Vec<_>>(), vec![0]);
+        assert_eq!(labels, &[0], "so the replica clears the same indexes");
+    }
+
+    #[test]
+    fn the_survivor_is_still_its_own_record() {
+        // The cancelled node must not be folded into the live create: they are
+        // different shapes, and one of them is deleted a record later.
+        let g = graph_cell();
+        with_attrs(&g, &["v"]);
+        {
+            let mut graph = g.borrow_mut();
+            graph.get_label_id_mut("A");
+            graph.get_label_id_mut("B");
+        }
+        let records = digest(&cancelled(&g), &g);
+        let survivor = records
+            .iter()
+            .find(|r| matches!(r, Record::CreateNode { labels, .. } if labels == &[1]))
+            .expect("the surviving node's create");
+        let Record::CreateNode { ids, .. } = survivor else {
+            unreachable!()
+        };
+        assert_eq!(ids.iter().collect::<Vec<_>>(), vec![1]);
+    }
+
+    #[test]
+    fn the_pair_comes_last_so_a_reuse_orders_after_it() {
+        // A later commit in the same query can reclaim the id from the bin, and
+        // its create is appended after these records. The delete has to be in
+        // the buffer *before* that create, not merely somewhere in it.
+        let g = graph_cell();
+        {
+            let mut graph = g.borrow_mut();
+            graph.get_label_id_mut("A");
+        }
+        let mut p = Pending::default();
+        p.set_schema_baseline(&g);
+        p.stage_created_node(0, &[0], &[]);
+        p.stage_deleted_node(7, &[0]);
+        p.delete_pending_node(NodeId::from(0_u64));
+
+        let records = digest(&p, &g);
+        let last_two = &records[records.len() - 2..];
+        assert!(
+            matches!(last_two[0], Record::CreateNode { .. })
+                && matches!(last_two[1], Record::DeleteNode { .. }),
+            "{records:#?}"
         );
     }
 }
