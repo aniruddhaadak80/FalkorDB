@@ -236,6 +236,13 @@ type Shape = (Vec<u32>, Vec<u16>);
 /// Every record a committed `Pending` implies, in apply order, handed to `out`
 /// one at a time.
 ///
+/// "Apply order" is the sequence of the calls below, and it is the only
+/// ordering the format requires: schema announcements before the records whose
+/// ids depend on them, and edges deleted before the nodes they hang off. Within
+/// one of those stages the records are disjoint — every entity belongs to
+/// exactly one group — so their order among themselves carries no meaning and
+/// is not imposed.
+///
 /// Eager in the grouping — a shape's members are only known once every entity
 /// has been seen — but records go out as they are built, so peak memory is one
 /// stage's group map plus one record rather than every record at once. The
@@ -360,10 +367,6 @@ fn digest_created_nodes(
         slots[slot].1.push(id);
     }
 
-    // Sorted where it sits. Collecting into a map first only to hand it to
-    // `sorted_groups`, which turns it straight back into a sorted `Vec`, hashed
-    // every shape for nothing.
-    slots.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     for ((labels, attr_ids), ids) in slots {
         let rows = gather_rows(&ids, &attr_ids, &p.new_nodes_attrs);
         out(Record::CreateNode {
@@ -404,7 +407,7 @@ fn digest_created_edges(
                 .or_default()
                 .push((id, u64::from(from), u64::from(to)));
         }
-        for (attr_ids, mut rows) in sorted_groups(groups) {
+        for (attr_ids, mut rows) in groups {
             // Sort the triples together so the edge ids come out ascending and
             // the endpoints stay aligned with them. Ascending is what makes the
             // run encodings eligible, and edge ids are allocated sequentially,
@@ -445,7 +448,7 @@ fn digest_deleted_edges(
             u64::from(to),
         ));
     }
-    for (type_id, mut rows) in sorted_groups(groups) {
+    for (type_id, mut rows) in groups {
         rows.sort_unstable();
         out(Record::DeleteEdge {
             ids: rows.iter().map(|r| r.0).collect(),
@@ -520,10 +523,10 @@ fn digest_updates(
             .or_default()
             .push(*id);
     }
-    for ((labels, relation_id, attr_ids), mut ids) in sorted_groups(groups) {
+    for ((labels, relation_id, attr_ids), mut ids) in groups {
         // Ascending, so the rows below are gathered in that order and the run
-        // encodings stay eligible. A hash map has no order of its own, so this
-        // is also what makes the output reproducible.
+        // encodings stay eligible. This is about the ids *within* a record;
+        // the order of records among themselves carries no meaning.
         ids.sort_unstable();
         let ids: IdList = ids.into_iter().collect();
         let rows = gather_rows(&ids, &attr_ids, attrs);
@@ -613,7 +616,6 @@ fn digest_deleted_nodes(
         slots[slot].1.push(id);
     }
 
-    slots.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     for (labels, ids) in slots {
         out(Record::DeleteNode { ids, labels });
     }
@@ -639,25 +641,12 @@ fn digest_labels(
         shape.dedup();
         groups.entry(shape).or_default().push(id);
     }
-    for (labels, mut ids) in sorted_groups(groups) {
-        // Ascending for the same two reasons as everywhere else: it keeps the
-        // run encodings eligible, and a hash map has no order to be
-        // reproducible about.
+    for (labels, mut ids) in groups {
+        // Ascending, which keeps the run encodings eligible.
         ids.sort_unstable();
         let ids: IdList = ids.into_iter().collect();
         out(Record::Labels { add, ids, labels });
     }
-}
-
-/// Groups in a deterministic order.
-///
-/// A `HashMap` iterates arbitrarily, so without this the same query could emit
-/// its records in a different order on two runs — which would defeat the
-/// byte-for-byte comparison the cross-engine harness rests on.
-fn sorted_groups<K: Ord, V>(groups: FxHashMap<K, V>) -> Vec<(K, V)> {
-    let mut out: Vec<(K, V)> = groups.into_iter().collect();
-    out.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    out
 }
 
 /// The `count x n` row-major values for one shape.
@@ -1145,11 +1134,25 @@ mod tests {
 
         let records = build(&p, &g);
         assert_eq!(records.len(), 2, "two shapes");
-        let Record::Update { entity, ids, .. } = &records[0] else {
-            panic!("wrong record");
-        };
-        assert_eq!(*entity, EntityType::Node);
-        assert_eq!(ids, &[1, 2]);
+        // By shape, not by position — see `deleted_edges_group_by_relationship_type`.
+        let mut seen: Vec<(Vec<u16>, Vec<u64>)> = records
+            .iter()
+            .map(|r| {
+                let Record::Update {
+                    entity,
+                    ids,
+                    attr_ids,
+                    ..
+                } = r
+                else {
+                    panic!("wrong record: {r:?}");
+                };
+                assert_eq!(*entity, EntityType::Node);
+                (attr_ids.clone(), ids.iter().collect())
+            })
+            .collect();
+        seen.sort();
+        assert_eq!(seen, vec![(vec![0], vec![1, 2]), (vec![0, 1], vec![3])]);
     }
 
     #[test]
@@ -1273,14 +1276,18 @@ mod tests {
 
         let records = build(&p, &g);
         assert_eq!(records.len(), 2, "two types, two records");
-        let Record::DeleteEdge {
+        // Found by type rather than by position: records within one stage are
+        // disjoint, so nothing orders them and nothing should depend on it.
+        let Some(Record::DeleteEdge {
             ids,
             relation_id,
             src,
             dst,
-        } = &records[0]
+        }) = records
+            .iter()
+            .find(|r| matches!(r, Record::DeleteEdge { relation_id: 0, .. }))
         else {
-            panic!("wrong record: {:?}", records[0]);
+            panic!("no record for type 0: {records:#?}");
         };
         assert_eq!(*relation_id, 0);
         assert_eq!(ids, &[1, 3]);
