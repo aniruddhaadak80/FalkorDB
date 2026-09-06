@@ -629,6 +629,14 @@ impl Pending {
             self.created_rel_types.remove(&rel_id);
             if let Some(entries) = self.created_rels_by_type.get_mut(&type_name) {
                 entries.retain(|(rid, _, _)| *rid != rel_id);
+                // And drop the group once it is empty. A type whose every edge
+                // was cascaded away was never registered on the graph — nothing
+                // of that type reached `create_relationships_bulk` — so leaving
+                // the key behind hands the effects emitter a type name it
+                // cannot resolve.
+                if entries.is_empty() {
+                    self.created_rels_by_type.remove(&type_name);
+                }
             }
             let attrs = self.new_relationships_attrs.remove(&rel_id.into());
             self.deleted_relationships.remove(rel_id.into());
@@ -973,12 +981,9 @@ impl Pending {
     ) -> Result<(), String> {
         if !self.created_nodes.is_empty() {
             stats.borrow_mut().nodes_created += self.created_nodes.len();
-            let mut g = g.borrow_mut();
-            // The allocator handed these out, so none of them can be live;
-            // the graph's own mark is the right one here.
-            let mark = g.first_unallocated_node_id();
-            g.create_nodes(&self.created_nodes, mark)
-                .map_err(|e| e.to_string())?;
+            // The allocator handed these out — see `create_allocated_nodes`
+            // for why the graph's own mark cannot judge them.
+            g.borrow_mut().create_allocated_nodes(&self.created_nodes);
         }
         if !self.created_rel_types.is_empty() {
             stats.borrow_mut().relationships_created += self.created_rel_types.len();

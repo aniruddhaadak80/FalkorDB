@@ -1507,6 +1507,30 @@ impl Graph {
         }
     }
 
+    /// Create nodes this graph's own allocator issued.
+    ///
+    /// Unchecked, and it has to be. `return_node_id` puts a *cancelled
+    /// reservation* into the recycle bin while `node_count` has not moved, so
+    /// mid-transaction `first_unallocated_node_id()` counts an id that was
+    /// never live and overstates the boundary. `CREATE (a)-[:R]->(b) DELETE b`
+    /// reaches exactly that: b's id goes to the bin, the boundary becomes 1,
+    /// and the checked form then rejects a's id 0 as already live — a
+    /// legitimate query refused.
+    ///
+    /// The ids here came from [`Self::reserve_nodes`], so there is nothing a
+    /// check could tell this caller that the allocator did not already
+    /// guarantee. The effects path has no such guarantee, which is why it uses
+    /// the checked form.
+    ///
+    /// The underlying flaw is that `reserved_node_count` is a count standing in
+    /// for a set — see the follow-up replacing it with an exact reservation.
+    pub fn create_allocated_nodes(
+        &mut self,
+        nodes: &RoaringTreemap,
+    ) {
+        let _ = self.create_nodes(nodes, 0);
+    }
+
     /// Create every node in `nodes`, or refuse and change nothing.
     ///
     /// # Errors

@@ -388,11 +388,20 @@ fn digest_created_edges(
     }
     let graph = g.borrow();
     for (type_name, entries) in &p.created_rels_by_type {
-        let relation_id = graph
-            .get_type_id(type_name)
-            .expect("created relationship type must be registered")
-            .0;
-        let relation_id = schema_id(relation_id);
+        // Not `expect`, for the same reason `digest_updates` does not use the
+        // panicking type lookup: a type resolves only once an edge of it has
+        // actually been committed, and a transaction can create an edge and
+        // then cascade it away — `CREATE (a)-[:R]->(b) DELETE a` deletes the
+        // edge along with the node. That left `{"R": []}` behind and took the
+        // server down on a legitimate query. The group is dropped rather than
+        // sent: there is no such edge to replicate.
+        let Some(relation_id) = graph.get_type_id(type_name).map(|t| schema_id(t.0)) else {
+            debug_assert!(
+                entries.is_empty(),
+                "a type with surviving edges must have been registered by commit"
+            );
+            continue;
+        };
         // Already partitioned by type; split further by attribute shape.
         let mut groups: FxHashMap<Vec<u16>, Vec<(u64, u64, u64)>> = FxHashMap::default();
         for &(rel_id, from, to) in entries {
@@ -1450,6 +1459,65 @@ mod tests {
             buf.len() < 130_000,
             "10,000 nodes should encode in ~120 KB, got {}",
             buf.len()
+        );
+    }
+}
+
+#[cfg(test)]
+mod cascade {
+    use super::*;
+    use crate::effects::v3::staging::StagePending;
+    use crate::effects::v3::test_aux::{digest, graph_cell};
+    use crate::graph::graph::{NodeId, RelationshipId};
+    use crate::runtime::pending::Pending;
+    use std::sync::Arc;
+
+    /// `CREATE (a)-[:R]->(b) DELETE a` — the delete cascades to the edge before
+    /// either reaches the graph.
+    fn cascaded() -> Pending {
+        let mut p = Pending::default();
+        p.stage_created_node(0, &[], &[]);
+        p.stage_created_node(1, &[], &[]);
+        p.created_relationship(
+            RelationshipId::from(0_u64),
+            NodeId::from(0_u64),
+            NodeId::from(1_u64),
+            Arc::new("R".to_owned()),
+        );
+        p.remove_pending_relationships_for_node(NodeId::from(0_u64));
+        p
+    }
+
+    #[test]
+    fn the_cascade_leaves_no_empty_group_behind() {
+        // The key has to go with its last entry. A type whose every edge was
+        // cascaded away was never registered on the graph — nothing of it
+        // reached `create_relationships_bulk` — so a key left behind is a type
+        // name the emitter cannot resolve.
+        let p = cascaded();
+        assert!(
+            p.created_rels_by_type.is_empty(),
+            "{:?}",
+            p.created_rels_by_type.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn an_unregistered_type_is_dropped_rather_than_panicking() {
+        // The emitter's own guard, tested against the state the cascade used
+        // to leave: this took the server down with "created relationship type
+        // must be registered" on a legitimate query.
+        let g = graph_cell();
+        let mut p = cascaded();
+        p.created_rels_by_type
+            .insert(Arc::new("R".to_owned()), Vec::new());
+
+        let records = digest(&p, &g);
+        assert!(
+            !records
+                .iter()
+                .any(|r| matches!(r, Record::CreateEdge { .. })),
+            "no such edge exists to replicate: {records:#?}"
         );
     }
 }
