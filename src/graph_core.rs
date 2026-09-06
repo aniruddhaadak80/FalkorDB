@@ -1239,7 +1239,7 @@ fn query_sync(
                         // Unless it was the master's write: the master only
                         // replicates a query that already succeeded there, so
                         // this failing means the two have diverged.
-                        divergence_guard::on_failure(ctx, key_name, "GRAPH.QUERY", &err);
+                        divergence_guard::on_failure(ctx, key_name, "GRAPH.QUERY", &err, None);
                         return Err(redis_module::RedisError::String(err));
                     }
                 }
@@ -1416,7 +1416,7 @@ fn profile_sync(
                 disable_tracking();
             }
             // See `query_sync`: a replayed command failing is divergence.
-            divergence_guard::on_failure(ctx, key_name, "GRAPH.PROFILE", &err);
+            divergence_guard::on_failure(ctx, key_name, "GRAPH.PROFILE", &err, None);
             return Err(redis_module::RedisError::String(err));
         }
     }

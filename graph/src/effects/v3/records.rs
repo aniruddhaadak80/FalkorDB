@@ -1,6 +1,7 @@
 //! The records themselves, and reading a whole payload.
 
 use std::borrow::Cow;
+use std::ops::Deref;
 
 use crate::runtime::value::Value;
 
@@ -640,9 +641,19 @@ impl EffectDecode<3> for Record {
 ///
 /// Which is `Cow`, so this is a newtype over one rather than the same two
 /// variants written out again. The wrapper keeps the domain name and gives
-/// `records` somewhere to live; the `Deref` comes for free, so nothing has to
-/// match on which case it holds.
+/// `records` somewhere to live; `Deref` below means nothing else has to match
+/// on which case it holds.
 pub struct Payload<'a>(Cow<'a, [u8]>);
+
+impl Deref for Payload<'_> {
+    type Target = [u8];
+
+    /// The plaintext, whichever case it came from — which is what every reader
+    /// of a payload actually wants.
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
 
 impl Payload<'_> {
     /// The record stream, decoded one at a time.

@@ -76,7 +76,7 @@ pub fn graph_effect(
             tg.graph.rollback();
             // `on_failure` decides for itself whether this was replayed; a
             // client-sent payload returns the error below and nothing more.
-            divergence_guard::on_failure(ctx, &key_str.to_string(), "GRAPH.EFFECT", &e);
+            divergence_guard::on_failure(ctx, &key_str.to_string(), "GRAPH.EFFECT", &e, Some(buf));
             Err(redis_module::RedisError::String(format!(
                 "ERR effect apply failed: {e}"
             )))

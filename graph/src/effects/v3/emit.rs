@@ -101,7 +101,6 @@ pub fn emit_schema_additions(
 ///
 /// Returns an error if a property is not registered, which would mean
 /// `create_constraint` did not run or did not register it.
-
 pub fn build_constraint_buffer(
     g: &Graph,
     create: bool,

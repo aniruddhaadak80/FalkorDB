@@ -33,6 +33,8 @@ pub mod writer;
 pub use error::DecodeError;
 pub use reader::Reader;
 
+use std::fmt::Write as _;
+
 use crate::graph::graph::Graph;
 use announce::{AnnouncedConstraint, AnnouncedIndex, SchemaBaseline};
 use atomic_refcell::AtomicRefCell;
@@ -92,6 +94,20 @@ pub trait EffectsFormat<const VERSION: u8> {
         sink: &dyn ReplicationSink,
         key: &[u8],
         buf: Vec<u8>,
+    );
+
+    /// Describe what this payload *says*, one line per record, for a
+    /// divergence report.
+    ///
+    /// The format's half of [`EffectsPayload::describe`]: the caller renders
+    /// the bytes, which are just bytes, and this renders their meaning, which
+    /// is not. Best-effort by construction — it is called precisely because
+    /// something in the payload was rejected, so it describes as far as it
+    /// gets and then says where it stopped, rather than returning an error
+    /// nobody could act on.
+    fn describe(
+        buf: &[u8],
+        out: &mut Vec<String>,
     );
 
     /// Apply a payload to `graph`.
@@ -163,6 +179,22 @@ pub trait EffectsFormat<const VERSION: u8> {
 /// downtime. Today the two coincide because v3 is the only version that exists.
 pub const WIRE_VERSION: u8 = v3::EFFECTS_VERSION;
 
+/// How much of a diverged payload the log reproduces in hex.
+///
+/// A cap rather than the whole buffer because this runs on the path where a
+/// replica is already about to resync the entire graph, and an unbounded dump
+/// would put megabytes into the server log to explain a failure the lines above
+/// it have usually already named. 2 KiB covers a typical effects payload whole
+/// — the primary only takes this path when the payload is *smaller* than
+/// shipping the query — and the total length is always reported, so a reader
+/// can see when there was more.
+const DESCRIBE_BYTE_LIMIT: usize = 2048;
+
+/// Bytes per hex line. Two hex digits each, so 64 characters of payload per
+/// line, which leaves room for the offset and the host's own prefix inside one
+/// log message.
+const DESCRIBE_BYTES_PER_LINE: usize = 32;
+
 /// A `GRAPH.EFFECT` payload, whatever version it is in.
 ///
 /// The one type the rest of the codebase names. Its methods pick the format:
@@ -229,6 +261,49 @@ impl EffectsPayload {
         buf: Vec<u8>,
     ) {
         <Self as EffectsFormat<WIRE_VERSION>>::replicate(sink, key, buf);
+    }
+
+    /// Describe a payload for a divergence report: what it says, then the
+    /// bytes it arrived as.
+    ///
+    /// One line per element, because a Redis log message is truncated at a
+    /// little over a kilobyte and a payload is not — the host logs these one
+    /// at a time. The bytes come last and unconditionally, including for a
+    /// version this build cannot read at all: they are the only part that is
+    /// still true when the rendering above is empty or wrong, and they are
+    /// what a reader diffs against the primary's own record of what it sent.
+    #[must_use]
+    pub fn describe(buf: &[u8]) -> Vec<String> {
+        let mut out = vec![format!("{} bytes on the wire", buf.len())];
+        match buf.first() {
+            // Not a payload at all. The line above already said so.
+            None => return out,
+            Some(&v3::EFFECTS_VERSION) => {
+                <Self as EffectsFormat<{ v3::EFFECTS_VERSION }>>::describe(buf, &mut out);
+            }
+            Some(&other) => out.push(format!(
+                "version {other}: no format in this build reads it, so nothing below is decoded"
+            )),
+        }
+        for (i, chunk) in buf
+            .chunks(DESCRIBE_BYTES_PER_LINE)
+            .take(DESCRIBE_BYTE_LIMIT / DESCRIBE_BYTES_PER_LINE)
+            .enumerate()
+        {
+            let offset = i * DESCRIBE_BYTES_PER_LINE;
+            let mut hex = String::with_capacity(chunk.len() * 2);
+            for b in chunk {
+                let _ = write!(hex, "{b:02x}");
+            }
+            out.push(format!("bytes[{offset:#06x}] {hex}"));
+        }
+        if buf.len() > DESCRIBE_BYTE_LIMIT {
+            out.push(format!(
+                "… {} more bytes not shown",
+                buf.len() - DESCRIBE_BYTE_LIMIT
+            ));
+        }
+        out
     }
 
     /// Apply a payload, in the version **it** declares.

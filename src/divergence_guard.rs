@@ -20,6 +20,7 @@
 // `log_warning` is the most severe level Redis offers a module: `RedisLogLevel`
 // is Debug | Notice | Verbose | Warning, and the binding maps `log::Level::Error`
 // onto Warning. Redis prints it with `#`, which is what an operator greps for.
+use graph::effects::EffectsPayload;
 use redis_module::logging::log_warning;
 use redis_module::{Context, ContextFlags};
 use std::time::Duration;
@@ -54,6 +55,7 @@ pub fn on_failure(
     graph_name: &str,
     cmd_name: &str,
     detail: &str,
+    payload: Option<&[u8]>,
 ) {
     // The gate lives here rather than at the call site. A caller that forgets it
     // hands any client a way to force a replica to resync — or, under `LOADING`,
@@ -67,6 +69,9 @@ pub fn on_failure(
             "Diverged applying {cmd_name} on graph '{graph_name}' while loading from disk: \
              {detail}. A full resync cannot repair already-loaded state, shutting down."
         ));
+        // Before the exit, not after the branch: this is the case where the
+        // process is about to be gone and the log is the only thing left of it.
+        log_payload(graph_name, payload);
         std::process::exit(1);
     }
 
@@ -74,6 +79,7 @@ pub fn on_failure(
         "Replica diverged from master applying {cmd_name} on graph '{graph_name}': {detail}. \
          Scheduling a forced full resync with master."
     ));
+    log_payload(graph_name, payload);
 
     // Deferred rather than done here: this runs inside the command handler,
     // holding the graph's locks, and `REPLICAOF` tears down the replication
@@ -142,3 +148,61 @@ fn master_address(ctx: &Context) -> Option<(String, String)> {
     }
     Some((host, port))
 }
+
+/// Put the payload that diverged into the log, as records and as bytes.
+///
+/// A resync repairs the replica and destroys the evidence: the payload is held
+/// by nothing once this command returns, and the master does not keep what it
+/// sent either. Without this, a divergence report is a message about a buffer
+/// nobody can produce again.
+///
+/// Both renderings, because they answer different questions. The records say
+/// what the master claimed happened, which is what a reader compares against
+/// the query that ran there; the hex is what actually crossed the wire, which
+/// is what survives when the decoding is the thing that is wrong. A description
+/// that only decodes cannot show a payload that does not decode.
+///
+/// Inside the gate, so only a payload the master sent is ever logged. A
+/// `GRAPH.EFFECT` from a client is a bad request, and echoing arbitrary client
+/// bytes into the server log at warning level is a way to fill a disk.
+fn log_payload(
+    graph_name: &str,
+    payload: Option<&[u8]>,
+) {
+    let Some(buf) = payload else {
+        return;
+    };
+    for line in EffectsPayload::describe(buf) {
+        // One message per line rather than one per payload: `RM_LogRaw`
+        // formats into a fixed `char msg[LOG_MAX_LEN]`, so a single message
+        // carrying a whole payload would be cut off in the middle with nothing
+        // to say it had been.
+        log_warning(format!(
+            "Diverged payload on '{graph_name}': {}",
+            clip(&line)
+        ));
+    }
+}
+
+/// One log line's worth of `s`, cut on a character boundary.
+///
+/// A record's description is as long as the record: one `CREATE_NODE` can carry
+/// ten thousand rows. Redis truncates for us, but silently and at a byte — this
+/// says that it happened.
+fn clip(s: &str) -> String {
+    if s.len() <= LOG_LINE_BUDGET {
+        return s.to_string();
+    }
+    let end = (0..=LOG_LINE_BUDGET)
+        .rev()
+        .find(|&i| s.is_char_boundary(i))
+        .unwrap_or_default();
+    format!("{}… ({} bytes cut)", &s[..end], s.len() - end)
+}
+
+/// How much of one description line reaches the log.
+///
+/// `RM_LogRaw` in Redis formats into `char msg[LOG_MAX_LEN]`, `LOG_MAX_LEN`
+/// being 1024, and that budget also has to cover the module name Redis
+/// prepends and the prefix above. This leaves room for both.
+const LOG_LINE_BUDGET: usize = 880;

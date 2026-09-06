@@ -70,6 +70,7 @@
 use crate::narrow_int::width_for;
 use roaring::RoaringTreemap;
 use smallvec::SmallVec;
+use std::fmt;
 
 use super::{DecodeError, EffectWrite, Reader};
 
@@ -642,7 +643,7 @@ impl Segment {
 /// Most lists are one segment: every id allocator hands out consecutive ids, so
 /// a bulk create or a delete-by-label is a single [`Segment::Range`] from first
 /// push to last and never allocates.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct IdList {
     /// Inline for the common shapes — one range, or a range and a straggler —
     /// so the list itself costs no allocation either.
@@ -653,6 +654,26 @@ pub struct IdList {
     ///
     /// Everything the collapse decision needs, in one place — see [`Run`].
     run: Run,
+}
+
+/// The segments and the count, which is the whole of what the list *is* — the
+/// same pair [`PartialEq`] compares.
+///
+/// Written out rather than derived because the derive also prints [`Run`], the
+/// half-built segment the encoder is accumulating into. That is scratch: it
+/// says nothing about which ids the list holds, it is empty on any list that
+/// came off the wire, and at over a hundred characters it buries the segments
+/// in every test failure and every divergence log line that carries a record.
+impl fmt::Debug for IdList {
+    fn fmt(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+    ) -> fmt::Result {
+        f.debug_struct("IdList")
+            .field("len", &self.len)
+            .field("segments", &self.segments)
+            .finish()
+    }
 }
 
 /// By the ids, not by how they are segmented: the same sequence reached by
