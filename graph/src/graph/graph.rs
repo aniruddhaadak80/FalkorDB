@@ -1511,8 +1511,8 @@ impl Graph {
     ///
     /// Unchecked, and it has to be. `return_node_id` puts a *cancelled
     /// reservation* into the recycle bin while `node_count` has not moved, so
-    /// mid-transaction `first_unallocated_node_id()` counts an id that was
-    /// never live and overstates the boundary. `CREATE (a)-[:R]->(b) DELETE b`
+    /// mid-transaction the boundary `node_count + deleted_nodes.len()` counts
+    /// an id that was never live and overstates itself. `CREATE (a)-[:R]->(b) DELETE b`
     /// reaches exactly that: b's id goes to the bin, the boundary becomes 1,
     /// and the checked form then rejects a's id 0 as already live — a
     /// legitimate query refused.
@@ -1541,8 +1541,8 @@ impl Graph {
     /// id used to double-count silently and shift every later fresh id. A
     /// caller cannot forget the check when the operation itself is the check.
     ///
-    /// `first_unallocated` is the caller's rather than [`Self::first_unallocated_node_id`],
-    /// and it has to be: records inside one effects buffer are grouped by shape
+    /// `first_unallocated` is the caller's, and it has to be: this graph cannot
+    /// derive it. Records inside one effects buffer are grouped by shape
     /// rather than ordered by id, so a create of 500..600 may precede one of
     /// 0..500. Judged against this graph's *live* mark, the second of those is
     /// rejected — the mark has already advanced to 100 — even though the buffer
@@ -2612,26 +2612,6 @@ impl Graph {
     #[must_use]
     pub fn deleted_nodes_count(&self) -> u64 {
         self.deleted_nodes.len()
-    }
-
-    /// The first node id that has never been handed out.
-    ///
-    /// Ids below this are either live or sitting in the recycle bin; ids at or
-    /// above it are untouched. Derived, not stored — `reserve_node` computes the
-    /// next id the same way — which is exactly why a replica whose `node_count`
-    /// or bin has drifted from the primary's will start allocating ids the
-    /// primary would not, the moment it is promoted.
-    ///
-    /// **Not `max_node_id() + 1`**, though the arithmetic agrees whenever the
-    /// graph holds a live node. `max_node_id` returns a 0 *sentinel* for an
-    /// empty graph, which is indistinguishable from a graph whose highest id is
-    /// 0 — so a caller asking "has this id been handed out?" reads id 0 as used
-    /// on a graph that has never allocated anything. Substituting it made
-    /// `recreating_a_recycled_id_is_allowed` reject the very first
-    /// `CREATE_NODE` of id 0 with `NodeAlreadyLive`.
-    #[must_use]
-    pub fn first_unallocated_node_id(&self) -> u64 {
-        self.node_count + self.deleted_nodes.len()
     }
 
     #[must_use]

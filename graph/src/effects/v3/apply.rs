@@ -23,7 +23,10 @@ use crate::{
         AttrRef, INDEX_FLD_FULLTEXT, INDEX_FLD_VECTOR, Record, entity_tag, open_payload,
     },
     entity_type::EntityType,
-    graph::graph::{Graph, NodeOpError, TypeId},
+    graph::{
+        graph::{Graph, NodeOpError, TypeId},
+        id_space::{IdSpaceError, NodeIdSpace},
+    },
     index::{IndexType, indexer::IndexOptions},
     runtime::{pending::IndexDocs, runtime::map_to_index_options, value::Value},
 };
@@ -31,7 +34,6 @@ use crate::{
 // wrote it, so the error lives beside `DecodeError`. Re-exported because
 // this is where callers have always found it.
 pub use crate::effects::error::{ApplyError, LocalName};
-use roaring::RoaringTreemap;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
@@ -41,30 +43,19 @@ impl From<String> for ApplyError {
     }
 }
 
-/// Index bookkeeping that accumulates across a buffer and is committed once.
-#[derive(Default)]
-struct IndexOps {
+/// What accumulates across a buffer and is settled once, at the end.
+struct BufferOps {
     /// The same type the write path collects into, rather than a second set of
     /// four maps that has to agree with it by inspection.
     docs: IndexDocs,
-    /// The first never-used node id as of **before** this buffer, and the ids
-    /// this buffer has created so far.
+    /// The node id space this buffer is applied against.
     ///
-    /// Both are needed because the id space is only dense *between* buffers,
-    /// not within one: records are emitted grouped by shape, so a buffer can
-    /// create ids 500..600 before it creates 0..500, and mid-buffer
-    /// `node_count` is a count rather than a bound. Judging an id against the
-    /// mark as it was on entry, plus what this buffer has already added, is
-    /// stable under that reordering.
-    ///
-    /// `Graph::first_unallocated_node_id` rather than `max_node_id() + 1`: the latter
-    /// has a 0 sentinel for an empty graph, which reads as "id 0 was handed
-    /// out" and rejects the first create of id 0.
-    entry_unallocated: u64,
-    /// The ids this buffer has created and not since deleted. A delete removes
-    /// its ids again, because the allocator may hand a freed id back within the
-    /// same buffer.
-    created_here: RoaringTreemap,
+    /// Carried across the buffer rather than asked of the graph per record: the
+    /// id space is dense only *between* buffers, and records are emitted grouped
+    /// by shape, so a buffer can create ids 500..600 before it creates 0..500.
+    /// Mid-buffer the graph's own arithmetic is a count, not a boundary — see
+    /// [`NodeIdSpace`].
+    ids: NodeIdSpace,
 }
 
 /// Apply a whole `GRAPH.EFFECT` payload.
@@ -86,14 +77,18 @@ pub fn apply_effects(
     // be read; `open_payload` owns that plaintext and the records borrow from it.
     let payload = open_payload(buf)?;
 
-    let mut ops = IndexOps {
-        entry_unallocated: g.first_unallocated_node_id(),
-        ..IndexOps::default()
+    let mut ops = BufferOps {
+        docs: IndexDocs::default(),
+        ids: NodeIdSpace::at_entry(g),
     };
 
     for record in payload.records() {
         apply_record(g, record?, &mut ops)?;
     }
+
+    // Only now: a buffer is legitimately fragmented partway through, so this is
+    // a statement about the buffer, not about any record in it.
+    ops.ids.verify(g).map_err(id_space)?;
 
     g.commit_index(&mut ops.docs.node_adds, &mut ops.docs.node_removes);
     g.commit_edge_index(&mut ops.docs.edge_adds, &mut ops.docs.edge_removes);
@@ -101,16 +96,22 @@ pub fn apply_effects(
 }
 
 /// A refusal from a bulk node operation, as the divergence it is.
+///
+/// Unreachable for nodes since [`NodeIdSpace`] took over the question — it
+/// decides the same thing exactly, and first. Kept because the graph refusing is
+/// what makes the check impossible to forget, and a reachable-looking error is
+/// cheaper than an `unreachable!` that would take a replica down if it were ever
+/// wrong.
 fn node_op(
     e: NodeOpError,
-    ops: &IndexOps,
+    ops: &BufferOps,
     bin: u64,
 ) -> ApplyError {
     match e {
         NodeOpError::AlreadyLive(id) => ApplyError::NodeAlreadyLive {
             id,
             bin,
-            first_unallocated: ops.entry_unallocated,
+            first_unallocated: ops.ids.entry_bound(),
         },
         NodeOpError::AlreadyRecycled(id) => ApplyError::NodeNotLive {
             id,
@@ -120,10 +121,41 @@ fn node_op(
     }
 }
 
+/// A refusal from the id-space check, as the divergence it is.
+///
+/// The graph states these in its own terms — it knows nothing of buffers or of a
+/// peer engine — so the wording that names both sides is added here, where there
+/// is a peer to name.
+fn id_space(e: IdSpaceError) -> ApplyError {
+    match e {
+        IdSpaceError::NeverIngested(id) => ApplyError::NodeNotLive {
+            id,
+            reason: "it was never allocated here",
+        },
+        IdSpaceError::Hole {
+            entry_bound,
+            highest,
+            ingested,
+        } => ApplyError::NodeIdsHaveAHole {
+            entry_bound,
+            highest,
+            ingested,
+        },
+        IdSpaceError::Miscounted {
+            graph_bound,
+            expected,
+        } => ApplyError::NodeCountMiscounted {
+            graph_bound,
+            expected,
+        },
+        IdSpaceError::IdOutOfRange(id) => ApplyError::NodeIdOutOfRange { id },
+    }
+}
+
 fn apply_record(
     g: &mut Graph,
     record: Record,
-    ops: &mut IndexOps,
+    ops: &mut BufferOps,
 ) -> Result<(), ApplyError> {
     match record {
         Record::AddSchema {
@@ -169,23 +201,17 @@ fn apply_record(
             rows,
         } => {
             let nodes = ids.to_roaring();
-            // Only what the graph cannot know: an id this *buffer* already
-            // claimed. It is live in the graph by now, but the mark below is
-            // frozen at buffer entry and so cannot see it.
-            if let Some(twice) = (&nodes & &ops.created_here).min() {
-                return Err(ApplyError::NodeAlreadyLive {
-                    id: twice,
-                    bin: g.deleted_nodes_count(),
-                    first_unallocated: ops.entry_unallocated,
-                });
-            }
+            // Recorded, not judged. `create_nodes` below refuses an id that is
+            // live below the entry boundary, and what the boundary cannot see —
+            // whether the ids this buffer adds above it form a whole range — is a
+            // statement about the buffer, so it is checked once at the end.
+            ops.ids.created(&nodes).map_err(id_space)?;
             g.add_reserved_node_count(ids.len() as u64);
             // The graph refuses rather than double-counting, so there is no
             // separate check here to keep in step with it.
             let bin = g.deleted_nodes_count();
-            g.create_nodes(&nodes, ops.entry_unallocated)
+            g.create_nodes(&nodes, ops.ids.entry_bound())
                 .map_err(|e| node_op(e, ops, bin))?;
-            ops.created_here |= &nodes;
 
             // The graph's bulk APIs take `&[u64]`, so the ids are materialized
             // once here rather than per call.
@@ -316,29 +342,18 @@ fn apply_record(
             // `Vec<u64>` first, and a delete-by-label arrives as a consecutive
             // range — the one shape that has no vector to hand over.
             let nodes = ids.to_roaring();
-            // Only what the graph cannot know: at or above the mark frozen at
-            // buffer entry and not created by this buffer means it was never
-            // allocated here at all. The second half matters because a buffer
-            // may legitimately create a node and then delete it.
-            if let Some(id) = (&nodes - &ops.created_here)
-                .max()
-                .filter(|&id| id >= ops.entry_unallocated)
-            {
-                return Err(ApplyError::NodeNotLive {
-                    id,
-                    reason: "it was never allocated here",
-                });
-            }
+            // Never handed out, or handed out and freed: not live either way,
+            // and the id space knows both without needing to remember what this
+            // buffer created. That matters for the case a running set of created
+            // ids existed to allow — a multi-commit query
+            // (`CREATE (n) WITH n DELETE n WITH 1 AS z CREATE ()`) commits three
+            // times into one buffer and the allocator recycles the freed id on
+            // the third, so the same id is legitimately created, deleted and
+            // created again inside one payload.
+            ops.ids.deletable(&nodes).map_err(id_space)?;
             let bin = g.deleted_nodes_count();
             g.delete_nodes(&nodes, &mut ops.docs.node_removes)
                 .map_err(|e| node_op(e, ops, bin))?;
-            // Deleting releases the id back to the bin, so a *later* record in
-            // this same buffer may legitimately create it again: a multi-commit
-            // query (`CREATE (n) WITH n DELETE n WITH 1 AS z CREATE ()`) commits
-            // three times into one buffer, and the allocator recycles the freed
-            // id on the third. Leaving it in `created_here` makes that a
-            // false `NodeAlreadyLive` and discards the whole payload.
-            ops.created_here -= &nodes;
             Ok(())
         }
 
@@ -811,8 +826,17 @@ mod tests {
 
     #[test]
     fn one_buffer_claiming_an_id_twice_aborts() {
-        // Neither record's ids were live on entry, so that boundary alone
-        // cannot see this. It is still divergence.
+        // Neither record's ids were live on entry, so the entry boundary alone
+        // cannot see this — id 1 is above it and reads as fresh both times. What
+        // catches it is the count: `node_count` moved twice for one id, so the
+        // graph's boundary ends up one past where the ids carried put it.
+        //
+        // Reported at the end of the buffer rather than at the record, and
+        // without naming the id. Naming it would need the set to remember how
+        // many times each id arrived, or to shrink on delete — and a delete
+        // followed by a recreate of the same id inside one buffer is legitimate,
+        // so a record-level check cannot tell the two apart. The buffer is
+        // refused either way, which is what matters.
         let mut g = graph();
         let mut buf = new_buffer();
         Record::CreateNode {
@@ -831,9 +855,20 @@ mod tests {
         .encode(&mut buf);
         let err = apply_effects(&mut g, &buf).expect_err("must refuse");
         assert!(
-            matches!(err, ApplyError::NodeAlreadyLive { id: 1, .. }),
+            matches!(
+                err,
+                ApplyError::NodeCountMiscounted {
+                    graph_bound: 4,
+                    expected: 3
+                }
+            ),
             "{err}"
         );
+        // No assertion on `node_count` here, unlike the record-level refusals
+        // above: this one fires after both records have been applied, so the
+        // graph in hand is the half-applied one. Nothing rewinds it — the caller
+        // drops the whole version on error (`MvccGraph::rollback`), which is what
+        // makes the buffer transactional.
     }
 
     #[test]
@@ -1049,10 +1084,14 @@ mod tests {
         .encode(&mut buf);
         apply_effects(&mut g, &buf).expect("a recycled id must apply");
 
-        // Fresh: past anything ever handed out.
+        // Fresh: the next id never handed out. Id 3 rather than an arbitrary
+        // high one — a master allocates the lowest free id, so it cannot reach
+        // 99 without having handed out everything below it, and a buffer that
+        // claims otherwise is divergence rather than a fresh create. That case
+        // is `a_buffer_that_jumps_the_bound_is_refused`.
         let mut buf = new_buffer();
         Record::CreateNode {
-            ids: IdList::from([99]),
+            ids: IdList::from([3]),
             labels: vec![],
             attr_ids: vec![],
             rows: vec![],
@@ -1066,6 +1105,36 @@ mod tests {
         let err = apply_effects(&mut g, &buf).expect_err("must refuse");
         assert!(
             matches!(err, ApplyError::NodeNotLive { id: 0, .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_buffer_that_jumps_the_bound_is_refused() {
+        // Creating id 9 on a graph that has handed out nothing leaves 0..8
+        // allocated and never created. No master produces that: it allocates the
+        // lowest free id, so reaching 9 means it created everything below, and a
+        // replica that accepted this would hold an id space its master does not
+        // have. Refused as the divergence it is, and the whole buffer is dropped.
+        let mut g = graph();
+        let mut buf = new_buffer();
+        Record::CreateNode {
+            ids: IdList::from([9]),
+            labels: vec![],
+            attr_ids: vec![],
+            rows: vec![],
+        }
+        .encode(&mut buf);
+        let err = apply_effects(&mut g, &buf).expect_err("must refuse");
+        assert!(
+            matches!(
+                err,
+                ApplyError::NodeIdsHaveAHole {
+                    entry_bound: 0,
+                    highest: 9,
+                    ingested: 1,
+                }
+            ),
             "{err}"
         );
     }

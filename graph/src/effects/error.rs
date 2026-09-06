@@ -172,6 +172,47 @@ pub enum ApplyError {
     )]
     NodeNotLive { id: u64, reason: &'static str },
 
+    /// A record names a node id with nothing past it.
+    ///
+    /// `u64::MAX` cannot be created: there is no boundary above it, and a master
+    /// that had genuinely handed out 2^64 ids would have exhausted memory long
+    /// before reaching the top.
+    #[error(
+        "effects buffer creates node {id}, which is past the end of the id space. \
+         The two engines have diverged; the buffer was not applied."
+    )]
+    NodeIdOutOfRange { id: u64 },
+
+    /// The batch left ids allocated between the boundary it started from and the
+    /// highest id it created, without creating them.
+    ///
+    /// An allocator hands out the lowest free id, so it cannot reach an id
+    /// without having handed out everything below it. A buffer that leaves a
+    /// hole was not produced by one — the likeliest cause is a replica that has
+    /// missed a buffer, and accepting it would leave an id space the master does
+    /// not have.
+    #[error(
+        "effects buffer allocated node ids {entry_bound}..={highest} but created only \
+         {ingested} of them. The two engines have diverged; the buffer was not applied."
+    )]
+    NodeIdsHaveAHole {
+        entry_bound: u64,
+        highest: u64,
+        ingested: u64,
+    },
+
+    /// The graph's own node-id boundary is not where the ids it was given put it.
+    ///
+    /// `node_count` is an independent counter, so the same id applied twice moves
+    /// it twice while the set of ids does not change. This is the only place
+    /// anything checks that counter against a value not derived from it.
+    #[error(
+        "after applying the buffer this replica's node id boundary is {graph_bound}, \
+         but the ids it carried put it at {expected}. The two engines have diverged; \
+         the buffer was not applied."
+    )]
+    NodeCountMiscounted { graph_bound: u64, expected: u64 },
+
     /// A schema id the local dictionary does not hold.
     ///
     /// The field is unsigned on the wire, so C's sentinels cannot arrive as
