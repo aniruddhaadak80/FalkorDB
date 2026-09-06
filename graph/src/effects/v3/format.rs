@@ -11,6 +11,7 @@ use super::emit::{build_constraint_buffer, build_effects_buffer, build_index_buf
 use super::{
     EFFECTS_VERSION, FLAG_COMPRESSED, apply::ApplyError, apply::apply_effects, open_payload, seal,
 };
+use crate::effects::EffectWrite;
 use crate::effects::announce::{AnnouncedConstraint, AnnouncedIndex, SchemaBaseline};
 use crate::effects::v3;
 use crate::effects::{EffectsFormat, EffectsPayload, ReplicationSink};
@@ -114,7 +115,7 @@ impl EffectsFormat<EFFECTS_VERSION> for EffectsPayload {
     fn build(
         pending: &Pending,
         graph: &AtomicRefCell<Graph>,
-        buf: &mut Vec<u8>,
+        buf: &mut dyn EffectWrite,
     ) -> u64 {
         build_effects_buffer(pending, graph, buf)
     }
@@ -124,7 +125,7 @@ impl EffectsFormat<EFFECTS_VERSION> for EffectsPayload {
         graph: &AtomicRefCell<Graph>,
         create: bool,
         index: &AnnouncedIndex<'_>,
-        buf: &mut Vec<u8>,
+        buf: &mut dyn EffectWrite,
     ) -> Result<(), String> {
         build_index_buffer(pending, graph, create, index, buf)
     }
@@ -134,7 +135,7 @@ impl EffectsFormat<EFFECTS_VERSION> for EffectsPayload {
         create: bool,
         constraint: &AnnouncedConstraint<'_>,
         baseline: &SchemaBaseline,
-        buf: &mut Vec<u8>,
+        buf: &mut dyn EffectWrite,
     ) -> Result<(), String> {
         build_constraint_buffer(graph, create, constraint, baseline, buf)
     }

@@ -30,7 +30,7 @@ use super::{DecodeError, EffectDecode, EffectEncode, EffectWrite, Reader, T_MAP,
 impl EffectEncode<3> for Value {
     fn encode(
         &self,
-        buf: &mut Vec<u8>,
+        buf: &mut dyn EffectWrite,
     ) {
         match self {
             Value::Null => write_tag(buf, si_type::T_NULL),
@@ -87,15 +87,17 @@ impl EffectEncode<3> for Value {
                 write_tag(buf, si_type::T_POINT);
                 // 2 x f32. Rust's own format used f64 here, which silently doubles
                 // the payload and desyncs everything after it.
-                buf.extend_from_slice(&p.latitude.to_le_bytes());
-                buf.extend_from_slice(&p.longitude.to_le_bytes());
+                buf.bytes(&p.latitude.to_le_bytes());
+                buf.bytes(&p.longitude.to_le_bytes());
             }
             Value::VecF32(v) => {
                 write_tag(buf, si_type::T_VECTOR_F32);
                 // Exact: count then a fixed 4 bytes per element.
                 buf.reserve(4 + v.len() * 4);
                 buf.u32(v.len() as u32);
-                buf.extend(v.iter().flat_map(|f| f.to_le_bytes()));
+                for f in v.iter() {
+                    buf.bytes(&f.to_le_bytes());
+                }
             }
             Value::Datetime(ts) => {
                 write_tag(buf, si_type::T_DATETIME);
@@ -378,10 +380,10 @@ mod tests {
         let levels = 5_000_usize;
         let mut buf = Vec::new();
         for _ in 0..levels {
-            buf.extend_from_slice(&(si_type::T_ARRAY as u32).to_le_bytes());
-            buf.extend_from_slice(&1_u32.to_le_bytes());
+            buf.bytes(&(si_type::T_ARRAY as u32).to_le_bytes());
+            buf.bytes(&1_u32.to_le_bytes());
         }
-        buf.extend_from_slice(&(si_type::T_NULL as u32).to_le_bytes());
+        buf.bytes(&(si_type::T_NULL as u32).to_le_bytes());
 
         let mut r = Reader::new(&buf);
         let v = Value::decode(&mut r).expect("depth is not the decoder's business");
@@ -405,8 +407,8 @@ mod tests {
         // the read rather than producing a partial value.
         let mut buf = Vec::new();
         for _ in 0..1_000 {
-            buf.extend_from_slice(&(si_type::T_ARRAY as u32).to_le_bytes());
-            buf.extend_from_slice(&1_u32.to_le_bytes());
+            buf.bytes(&(si_type::T_ARRAY as u32).to_le_bytes());
+            buf.bytes(&1_u32.to_le_bytes());
         }
         // ...and nothing at the bottom.
         //

@@ -73,11 +73,9 @@ pub const EFFECTS_VERSION: u8 = 3;
 
 pub mod apply;
 pub mod blocks;
-// Not `pub`: these take a `&mut Vec<u8>` because inside the format the bytes
-// *are* a `Vec` — that is what `EffectsBuffer` wraps, and `&mut self.0` is how
-// a newtype delegates. The parameter is only dangerous when someone outside
-// can supply it, which is how the host came to build announcement payloads
-// with a bare `Vec::new()`. Now it cannot: `EffectsBuffer` is the only door in.
+// Not `pub`: `EffectsBuffer` is the only door in. The emitter is handed a sink
+// — `&mut dyn EffectWrite` — never a buffer, so there is nothing for a caller
+// outside to supply even if it could reach these.
 pub(crate) mod emit;
 pub mod format;
 mod id_list;
@@ -343,7 +341,7 @@ const fn narrow_flag(v: u64) -> u32 {
 /// copy to drift. The assertion is what stands between a wider C constant and a
 /// silently truncated tag.
 pub fn write_tag(
-    buf: &mut impl EffectWrite,
+    buf: &mut dyn EffectWrite,
     v: u64,
 ) {
     buf.u32(u32::try_from(v).expect("a C constant must fit the 4 bytes the wire reads"));

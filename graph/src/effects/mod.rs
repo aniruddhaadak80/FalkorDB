@@ -32,6 +32,7 @@ pub mod writer;
 
 pub use error::DecodeError;
 pub use reader::Reader;
+pub use writer::EffectWrite;
 
 use std::fmt::Write as _;
 
@@ -150,7 +151,7 @@ pub(crate) trait EffectsFormat<const VERSION: u8> {
     fn build(
         pending: &Pending,
         graph: &AtomicRefCell<Graph>,
-        buf: &mut Vec<u8>,
+        buf: &mut dyn EffectWrite,
     ) -> u64;
 
     /// Append one index DDL statement.
@@ -164,7 +165,7 @@ pub(crate) trait EffectsFormat<const VERSION: u8> {
         graph: &AtomicRefCell<Graph>,
         create: bool,
         index: &AnnouncedIndex<'_>,
-        buf: &mut Vec<u8>,
+        buf: &mut dyn EffectWrite,
     ) -> Result<(), String>;
 
     /// Append one constraint statement, with the status this node reached.
@@ -178,7 +179,7 @@ pub(crate) trait EffectsFormat<const VERSION: u8> {
         create: bool,
         constraint: &AnnouncedConstraint<'_>,
         baseline: &SchemaBaseline,
-        buf: &mut Vec<u8>,
+        buf: &mut dyn EffectWrite,
     ) -> Result<(), String>;
 }
 
@@ -304,7 +305,7 @@ impl EffectsPayload {
 pub trait EffectEncode<const VERSION: u8> {
     fn encode(
         &self,
-        buf: &mut Vec<u8>,
+        buf: &mut dyn EffectWrite,
     );
 }
 
@@ -337,6 +338,42 @@ pub trait EffectDecode<const VERSION: u8>: Sized {
 /// call and lives on the runtime; what it must not do is originate there.
 pub struct EffectsBuffer(Vec<u8>);
 
+/// The sink half. Writing goes through [`EffectWrite`] like any other, which
+/// is what lets the emitter be handed *this* rather than the `Vec` inside it.
+impl std::io::Write for EffectsBuffer {
+    fn write(
+        &mut self,
+        b: &[u8],
+    ) -> std::io::Result<usize> {
+        self.0.extend_from_slice(b);
+        Ok(b.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl EffectWrite for EffectsBuffer {
+    fn bytes(
+        &mut self,
+        b: &[u8],
+    ) {
+        self.0.extend_from_slice(b);
+    }
+
+    fn written(&self) -> usize {
+        self.0.len()
+    }
+
+    fn reserve(
+        &mut self,
+        n: usize,
+    ) {
+        self.0.reserve(n);
+    }
+}
+
 impl Default for EffectsBuffer {
     fn default() -> Self {
         Self::new()
@@ -367,7 +404,7 @@ impl EffectsBuffer {
         pending: &Pending,
         graph: &AtomicRefCell<Graph>,
     ) -> u64 {
-        <EffectsPayload as EffectsFormat<WIRE_VERSION>>::build(pending, graph, &mut self.0)
+        <EffectsPayload as EffectsFormat<WIRE_VERSION>>::build(pending, graph, self)
     }
 
     /// Append one index DDL statement.
@@ -383,11 +420,7 @@ impl EffectsBuffer {
         index: &AnnouncedIndex<'_>,
     ) -> Result<(), String> {
         <EffectsPayload as EffectsFormat<WIRE_VERSION>>::build_index(
-            pending,
-            graph,
-            create,
-            index,
-            &mut self.0,
+            pending, graph, create, index, self,
         )
     }
 
@@ -404,11 +437,7 @@ impl EffectsBuffer {
         baseline: &SchemaBaseline,
     ) -> Result<(), String> {
         <EffectsPayload as EffectsFormat<WIRE_VERSION>>::build_constraint(
-            graph,
-            create,
-            constraint,
-            baseline,
-            &mut self.0,
+            graph, create, constraint, baseline, self,
         )
     }
 

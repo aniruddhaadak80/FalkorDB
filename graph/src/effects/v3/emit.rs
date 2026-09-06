@@ -22,6 +22,7 @@ use roaring::RoaringTreemap;
 use rustc_hash::FxHashMap;
 
 use crate::{
+    effects::EffectWrite,
     effects::v3::{self as v3, EffectEncode, IdList, Record},
     entity_type::EntityType,
     graph::graph::{DeletedEdge, Graph, NodeId, RelationshipId},
@@ -106,7 +107,7 @@ pub fn build_constraint_buffer(
     create: bool,
     c: &AnnouncedConstraint<'_>,
     baseline: &SchemaBaseline,
-    buf: &mut Vec<u8>,
+    buf: &mut dyn EffectWrite,
 ) -> Result<(), String> {
     let AnnouncedConstraint {
         ct,
@@ -178,7 +179,7 @@ pub fn build_index_buffer(
     g: &AtomicRefCell<Graph>,
     create: bool,
     ix: &AnnouncedIndex<'_>,
-    buf: &mut Vec<u8>,
+    buf: &mut dyn EffectWrite,
 ) -> Result<(), String> {
     let g = &g.borrow();
     // Derived here rather than by the caller, for the same reason
@@ -242,7 +243,7 @@ type Shape = (Vec<u32>, Vec<u16>);
 pub fn build_effects_buffer(
     p: &Pending,
     g: &AtomicRefCell<Graph>,
-    buf: &mut Vec<u8>,
+    buf: &mut dyn EffectWrite,
 ) -> u64 {
     let mut n = 0;
     for_each_record(p, g, |record| {
@@ -730,6 +731,7 @@ fn gather_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::effects::EffectWrite;
     use crate::effects::v3::staging::StagePending;
     use crate::effects::v3::{Record, read_buffer};
     use crate::entity_type::EntityType;

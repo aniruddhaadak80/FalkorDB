@@ -16,7 +16,7 @@ use super::*;
 /// why no record type is left un-batchable and the decoder has one shape per
 /// opcode.
 fn write_header(
-    buf: &mut Vec<u8>,
+    buf: &mut dyn EffectWrite,
     opcode: Opcode,
     count: Option<u32>,
 ) {
@@ -63,7 +63,7 @@ pub struct AttrRef<S> {
 /// used to collect the owned ones into a borrowed `Vec` per index record —
 /// an allocation to satisfy a signature.
 fn write_index_fields<S: AsRef<str>>(
-    buf: &mut Vec<u8>,
+    buf: &mut dyn EffectWrite,
     fields: &[AttrRef<S>],
 ) {
     // Floor: 2 bytes of id and an 8-byte length per field, the same minimum
@@ -367,7 +367,7 @@ pub fn read_record(r: &mut Reader<'_>) -> Result<Record, DecodeError> {
 impl EffectEncode<3> for Record {
     fn encode(
         &self,
-        buf: &mut Vec<u8>,
+        buf: &mut dyn EffectWrite,
     ) {
         match self {
             // `9 ADD_SCHEMA` — `SchemaType · LabelID|RelationID · name`.
@@ -832,9 +832,9 @@ pub fn maybe_compress(
     let checksum = crc32fast::hash(&buf[HEADER..]);
     buf.truncate(HEADER);
     buf[1] |= FLAG_COMPRESSED;
-    buf.extend_from_slice(&plain_len.to_le_bytes());
-    buf.extend_from_slice(&checksum.to_le_bytes());
-    buf.extend_from_slice(&frame);
+    buf.bytes(&plain_len.to_le_bytes());
+    buf.bytes(&checksum.to_le_bytes());
+    buf.bytes(&frame);
     true
 }
 
@@ -1873,9 +1873,9 @@ mod tests {
 
         let mut buf = vec![EFFECTS_VERSION, FLAG_COMPRESSED];
         // Declare a plaintext far smaller than the frame really expands to.
-        buf.extend_from_slice(&64_u32.to_le_bytes());
-        buf.extend_from_slice(&0_u32.to_le_bytes());
-        buf.extend_from_slice(&frame);
+        buf.bytes(&64_u32.to_le_bytes());
+        buf.bytes(&0_u32.to_le_bytes());
+        buf.bytes(&frame);
 
         assert!(matches!(
             open_payload(&buf),

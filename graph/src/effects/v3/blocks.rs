@@ -12,7 +12,7 @@ use super::{DecodeError, EffectDecode, EffectEncode, EffectWrite, Reader};
 
 /// `RelType` — one relationship id per record, part of the partition key.
 pub fn write_rel_type(
-    buf: &mut Vec<u8>,
+    buf: &mut dyn EffectWrite,
     relation_id: u32,
 ) {
     buf.schema_id(relation_id);
@@ -31,14 +31,16 @@ pub fn read_rel_type(r: &mut Reader<'_>) -> Result<u32, DecodeError> {
 /// block until roughly seven labels, and the block is already amortised over
 /// every row in the record.
 pub fn write_label_set(
-    buf: &mut Vec<u8>,
+    buf: &mut dyn EffectWrite,
     labels: &[u32],
 ) {
     // Count and payload together, before either is written: the exact size is
     // known here, so the block costs at most one growth however long it is.
     buf.reserve(2 + labels.len() * 4);
     buf.u16(labels.len() as u16);
-    buf.extend(labels.iter().flat_map(|&l| l.to_le_bytes()));
+    for &l in labels {
+        buf.u32(l);
+    }
 }
 
 /// Inverse of [`write_label_set`].
@@ -62,12 +64,14 @@ pub fn read_label_set(r: &mut Reader<'_>) -> Result<Vec<u32>, DecodeError> {
 /// before it touches a single row, instead of discovering a divergence halfway
 /// through applying one.
 pub fn write_attr_ids(
-    buf: &mut Vec<u8>,
+    buf: &mut dyn EffectWrite,
     attr_ids: &[u16],
 ) {
     buf.reserve(2 + attr_ids.len() * 2);
     buf.u16(attr_ids.len() as u16);
-    buf.extend(attr_ids.iter().flat_map(|&id| id.to_le_bytes()));
+    for &id in attr_ids {
+        buf.u16(id);
+    }
 }
 
 /// Inverse of [`write_attr_ids`].
@@ -97,7 +101,7 @@ pub fn read_attr_ids(r: &mut Reader<'_>) -> Result<Vec<u16>, DecodeError> {
 /// uncompressed and changes sign with the data once compressed, which does not
 /// justify a second layout two engines must match byte-for-byte.
 pub fn write_attr_values(
-    buf: &mut Vec<u8>,
+    buf: &mut dyn EffectWrite,
     rows: &[Value],
 ) {
     // A floor, not the size: a value is at least its 4-byte type tag, and most

@@ -519,7 +519,7 @@ impl Segment {
     /// The header byte, then whatever the variant needs.
     fn encode(
         &self,
-        buf: &mut Vec<u8>,
+        buf: &mut dyn EffectWrite,
     ) {
         match self {
             Self::Range { base, len } => {
@@ -536,12 +536,12 @@ impl Segment {
                 // would otherwise grow the payload buffer under itself, each
                 // realloc copying every byte written so far.
                 buf.reserve(n);
-                let before = buf.len();
+                let before = buf.written();
                 bitmap
                     .serialize_into(&mut *buf)
                     .expect("writing to a Vec cannot fail");
                 debug_assert_eq!(
-                    buf.len() - before,
+                    buf.written() - before,
                     n,
                     "serialized_size disagreed with serialize_into, so the length prefix lies"
                 );
@@ -552,7 +552,7 @@ impl Segment {
     /// `Range` and `Repeat` are the same three fields — a kind, a value and a
     /// count — so they share a writer rather than drifting apart.
     fn write_pair(
-        buf: &mut Vec<u8>,
+        buf: &mut dyn EffectWrite,
         kind: u8,
         value: u64,
         count: u64,
@@ -861,7 +861,7 @@ impl IdList {
     /// is a straight write of what the pushes built.
     pub fn encode(
         &self,
-        buf: &mut Vec<u8>,
+        buf: &mut dyn EffectWrite,
     ) {
         // Both the segment count and every segment's length are stated, and for
         // the same reason: a list has to be well-formed on its own, not only in
@@ -955,15 +955,15 @@ impl From<&[u64]> for IdList {
 
 /// Write `value` at a fixed width, little-endian.
 fn write_narrow(
-    buf: &mut Vec<u8>,
+    buf: &mut dyn EffectWrite,
     value: u64,
     width: u8,
 ) {
     match width {
-        1 => buf.push(value as u8),
-        2 => buf.extend_from_slice(&(value as u16).to_le_bytes()),
-        4 => buf.extend_from_slice(&(value as u32).to_le_bytes()),
-        _ => buf.extend_from_slice(&value.to_le_bytes()),
+        1 => buf.u8(value as u8),
+        2 => buf.bytes(&(value as u16).to_le_bytes()),
+        4 => buf.bytes(&(value as u32).to_le_bytes()),
+        _ => buf.bytes(&value.to_le_bytes()),
     }
 }
 
@@ -1212,7 +1212,7 @@ mod tests {
         buf.u32(1);
         buf.u8((width_code(1) << SEG_VALUE_WIDTH_SHIFT) | (width_code(4) << SEG_COUNT_WIDTH_SHIFT));
         buf.push(0);
-        buf.extend_from_slice(&u32::MAX.to_le_bytes());
+        buf.bytes(&u32::MAX.to_le_bytes());
 
         let mut r = Reader::new(&buf);
         let list = read_ids(&mut r, u32::MAX).expect("a valid range, however large");
@@ -1229,7 +1229,7 @@ mod tests {
         // than the record has ids.
         let mut buf = Vec::new();
         buf.u32(1_000);
-        buf.extend_from_slice(&[0x00, 0, 1]);
+        buf.bytes(&[0x00, 0, 1]);
         let mut r = Reader::new(&buf);
         assert_eq!(
             read_ids(&mut r, 4),
@@ -1246,7 +1246,7 @@ mod tests {
         // ids than the record holds would shift every later row.
         let mut buf = Vec::new();
         buf.u32(1);
-        buf.extend_from_slice(&[0x00, 0, 200]);
+        buf.bytes(&[0x00, 0, 200]);
         let mut r = Reader::new(&buf);
         assert!(matches!(
             read_ids(&mut r, 4),
@@ -1261,7 +1261,7 @@ mod tests {
         // range by a build that predates it.
         let mut buf = Vec::new();
         buf.u32(1);
-        buf.extend_from_slice(&[0xE0, 0, 1]);
+        buf.bytes(&[0xE0, 0, 1]);
         let mut r = Reader::new(&buf);
         assert_eq!(read_ids(&mut r, 1), Err(DecodeError::BadEncoding(0xE0)));
     }
@@ -1271,8 +1271,8 @@ mod tests {
         let mut buf = Vec::new();
         buf.u32(1);
         buf.u8((width_code(8) << SEG_VALUE_WIDTH_SHIFT) | (width_code(8) << SEG_COUNT_WIDTH_SHIFT));
-        buf.extend_from_slice(&(u64::MAX - 1).to_le_bytes());
-        buf.extend_from_slice(&100_u64.to_le_bytes());
+        buf.bytes(&(u64::MAX - 1).to_le_bytes());
+        buf.bytes(&100_u64.to_le_bytes());
         let mut r = Reader::new(&buf);
         assert!(matches!(
             read_ids(&mut r, 100),
@@ -1289,7 +1289,7 @@ mod tests {
         let mut buf = Vec::new();
         buf.u32(1);
         buf.u8((width_code(1) << SEG_VALUE_WIDTH_SHIFT) | (width_code(1) << SEG_COUNT_WIDTH_SHIFT));
-        buf.extend_from_slice(&[1, 2]);
+        buf.bytes(&[1, 2]);
         let mut r = Reader::new(&buf);
         assert_eq!(
             read_ids(&mut r, 4),
