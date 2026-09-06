@@ -1,5 +1,7 @@
 //! The records themselves, and reading a whole payload.
 
+use std::borrow::Cow;
+
 use crate::runtime::value::Value;
 
 use super::*;
@@ -630,11 +632,17 @@ impl EffectDecode<3> for Record {
 /// A payload with its header consumed, ready to yield records.
 ///
 /// Owns the plaintext only when it had to decompress; an uncompressed payload
-/// is borrowed straight from the caller's buffer.
-pub enum Payload<'a> {
-    Borrowed(&'a [u8]),
-    Owned(Vec<u8>),
-}
+/// is borrowed straight from the caller's buffer. Both cases are real and
+/// neither can be dropped: a compressed frame has to be inflated whole before
+/// any record can be read, so that plaintext must outlive the records
+/// borrowing from it, while an uncompressed payload is already the plaintext
+/// and copying it would be pure waste on the common path.
+///
+/// Which is `Cow`, so this is a newtype over one rather than the same two
+/// variants written out again. The wrapper keeps the domain name and gives
+/// `records` somewhere to live; the `Deref` comes for free, so nothing has to
+/// match on which case it holds.
+pub struct Payload<'a>(Cow<'a, [u8]>);
 
 impl Payload<'_> {
     /// The record stream, decoded one at a time.
@@ -642,10 +650,7 @@ impl Payload<'_> {
     pub fn records(&self) -> Records<'_> {
         Records {
             failed: false,
-            r: Reader::new(match self {
-                Self::Borrowed(b) => b,
-                Self::Owned(v) => v,
-            }),
+            r: Reader::new(&self.0),
         }
     }
 }
@@ -696,7 +701,7 @@ pub fn open_payload(buf: &[u8]) -> Result<Payload<'_>, DecodeError> {
     }
 
     if flags & FLAG_COMPRESSED == 0 {
-        return Ok(Payload::Borrowed(r.rest()));
+        return Ok(Payload(Cow::Borrowed(r.rest())));
     }
 
     // A frame has to be whole before any of it can be read, so this is the one
@@ -732,7 +737,7 @@ pub fn open_payload(buf: &[u8]) -> Result<Payload<'_>, DecodeError> {
             actual,
         });
     }
-    Ok(Payload::Owned(plain))
+    Ok(Payload(Cow::Owned(plain)))
 }
 
 /// Every record in a payload, materialized.
