@@ -284,7 +284,7 @@ fn read_one(
         si_type::T_DATE => Value::Date(r.i64()?),
         si_type::T_TIME => Value::Time(r.i64()?),
         si_type::T_DURATION => Value::Duration(r.i64()?),
-        other => return Err(DecodeError::BadValueType(other as u32)),
+        other => return Err(DecodeError::BadValueType(other)),
     };
     Ok(Some(v))
 }

@@ -182,6 +182,12 @@ const ROARING_FLOOR_BYTES: usize = 32;
 struct Run {
     /// Where the run starts in the segment list.
     start: usize,
+    /// Which way it goes, once a second segment has settled it.
+    ///
+    /// `None` while the run is a single id, which belongs to neither
+    /// direction — the id after it is what decides, and until then a push
+    /// either way continues this run rather than starting another.
+    desc: Option<bool>,
     /// What its segments cost as ranges — the comparison's other side.
     ///
     /// Counts only *closed* segments: the open one can still grow, so charging
@@ -316,15 +322,13 @@ impl Run {
     /// comparison.
     fn absorb(
         &mut self,
-        base: u64,
-        len: u64,
+        seg: &Segment,
     ) {
-        self.range_bytes += Segment::Range {
-            base,
-            len: len as u32,
-        }
-        .encoded_len();
-        self.add_range(base, len);
+        // The segment itself, not a reconstructed ascending one: a descending
+        // range's base is its highest id and can cost a wider value field.
+        self.range_bytes += seg.encoded_len();
+        // The bitmap side takes the id *set*, which is the same either way.
+        self.add_range(seg.min(), u64::from(seg.len()));
     }
 
     /// Whether the bitmap has already won, so one is worth building.
@@ -444,6 +448,15 @@ enum Segment {
     /// carries the same source id, so `CREATE_EDGE`'s `src` list is one value
     /// repeated — 10,000 of them was 10,000 one-id segments, and is now one.
     Repeat { id: u64, count: u32 },
+    /// `len` consecutive ids **descending** from `base`, so `base` is the first
+    /// id emitted and the highest — the mirror of [`Self::Range`], where `base`
+    /// is also the first and the lowest.
+    ///
+    /// Endpoint lists are what need it. `CREATE_EDGE`'s `src` and `dst` follow
+    /// *edge* id order, so their contents are unordered with respect to
+    /// themselves; a scan that walks nodes downward writes a strictly
+    /// descending endpoint column, which without this is one segment per id.
+    RangeDescending { base: u64, len: u32 },
     /// Strictly ascending ids with gaps, as a run-optimized roaring bitmap.
     ///
     /// Only produced by [`IdList::collapse`], never by a push: a bitmap holds
@@ -459,6 +472,21 @@ enum Segment {
         len: u32,
         max: u64,
     },
+    /// Strictly descending ids with gaps — the same roaring bitmap, read from
+    /// the top.
+    ///
+    /// A set has no direction, so the bitmap here is byte-identical to the one
+    /// [`Self::Ascending`] would hold for the same ids and the collapse
+    /// arithmetic is unchanged. Only the order the ids come back in differs,
+    /// and that is the header bit rather than anything in the blob.
+    ///
+    /// `min` is cached for the same reason `Ascending` caches `max`: it is the
+    /// boundary a push has to test, and `RoaringTreemap::min()` is not O(1).
+    Descending {
+        bitmap: RoaringTreemap,
+        len: u32,
+        min: u64,
+    },
 }
 
 /// The segment header byte.
@@ -470,22 +498,34 @@ enum Segment {
 /// bits 0-1  kind: 0 = Range, 1 = Ascending, 2 = Repeat
 /// bits 2-3  value width code   (Range base, Repeat id)
 /// bits 4-5  count width code   (Range len,  Repeat count)
-/// bits 6-7  reserved, must be zero
+/// bit  6    descending
+/// bit  7    reserved, must be zero
 /// ```
+///
+/// Direction is a bit rather than two more kinds because a descending segment
+/// is the same payload read the other way: `Range` gains a first-and-highest
+/// base instead of a first-and-lowest one, and `Ascending`'s bitmap is a set,
+/// which has no direction at all. Two more kinds would have meant a second
+/// blob format and a second cost model for encodings that are byte-identical.
+/// `Repeat` has no direction — one id, however many times — so the bit is
+/// rejected there rather than ignored.
 const SEG_KIND_MASK: u8 = 0b0000_0011;
 const SEG_KIND_RANGE: u8 = 0;
 const SEG_KIND_ASCENDING: u8 = 1;
 const SEG_KIND_REPEAT: u8 = 2;
 const SEG_VALUE_WIDTH_SHIFT: u8 = 2;
 const SEG_COUNT_WIDTH_SHIFT: u8 = 4;
-const SEG_RESERVED: u8 = 0b1100_0000;
+const SEG_DESCENDING: u8 = 0b0100_0000;
+const SEG_RESERVED: u8 = 0b1000_0000;
 
 impl Segment {
     /// How many ids this segment carries.
     const fn len(&self) -> u32 {
         match self {
             Self::Range { len, .. }
+            | Self::RangeDescending { len, .. }
             | Self::Ascending { len, .. }
+            | Self::Descending { len, .. }
             | Self::Repeat { count: len, .. } => *len,
         }
     }
@@ -495,8 +535,28 @@ impl Segment {
     const fn max(&self) -> u64 {
         match self {
             Self::Range { base, len } => *base + *len as u64 - 1,
-            Self::Repeat { id, .. } => *id,
+            Self::Repeat { id, .. } | Self::RangeDescending { base: id, .. } => *id,
             Self::Ascending { max, .. } => *max,
+            Self::Descending {
+                bitmap: _,
+                len,
+                min,
+            } => *min + *len as u64 - 1,
+        }
+    }
+
+    /// The lowest id this segment carries — what a descending push tests
+    /// against, as [`Self::max`] is what an ascending one tests.
+    const fn min(&self) -> u64 {
+        match self {
+            Self::Range { base, .. } | Self::Repeat { id: base, .. } => *base,
+            Self::RangeDescending { base, len } => *base - *len as u64 + 1,
+            Self::Ascending {
+                bitmap: _,
+                len,
+                max,
+            } => *max - *len as u64 + 1,
+            Self::Descending { min, .. } => *min,
         }
     }
 
@@ -506,13 +566,19 @@ impl Segment {
     /// write, so the collapse decision below compares like with like.
     fn encoded_len(&self) -> usize {
         match self {
-            Self::Range { base, len } => {
+            // The descending form's `base` is the run's *highest* id, so it
+            // can need a wider value field than the ascending form over the
+            // same ids. Charged from the actual base rather than the set's
+            // minimum, or the collapse would weigh the wrong encoding.
+            Self::Range { base, len } | Self::RangeDescending { base, len } => {
                 1 + width_for(*base) as usize + width_for(u64::from(*len)) as usize
             }
             Self::Repeat { id, count } => {
                 1 + width_for(*id) as usize + width_for(u64::from(*count)) as usize
             }
-            Self::Ascending { bitmap, .. } => 1 + 4 + bitmap.serialized_size(),
+            Self::Ascending { bitmap, .. } | Self::Descending { bitmap, .. } => {
+                1 + 4 + bitmap.serialized_size()
+            }
         }
     }
 
@@ -525,12 +591,20 @@ impl Segment {
             Self::Range { base, len } => {
                 Self::write_pair(buf, SEG_KIND_RANGE, *base, u64::from(*len));
             }
+            Self::RangeDescending { base, len } => {
+                Self::write_pair(buf, SEG_KIND_RANGE | SEG_DESCENDING, *base, u64::from(*len));
+            }
             Self::Repeat { id, count } => {
                 Self::write_pair(buf, SEG_KIND_REPEAT, *id, u64::from(*count));
             }
-            Self::Ascending { bitmap, .. } => {
+            Self::Ascending { bitmap, .. } | Self::Descending { bitmap, .. } => {
                 let n = bitmap.serialized_size();
-                buf.u8(SEG_KIND_ASCENDING);
+                buf.u8(SEG_KIND_ASCENDING
+                    | if matches!(self, Self::Descending { .. }) {
+                        SEG_DESCENDING
+                    } else {
+                        0
+                    });
                 buf.u32(n as u32);
                 // Reserve first: roaring writes itself in many small pieces and
                 // would otherwise grow the payload buffer under itself, each
@@ -580,6 +654,7 @@ impl Segment {
         if h & SEG_RESERVED != 0 {
             return Err(DecodeError::BadEncoding(h));
         }
+        let descending = h & SEG_DESCENDING != 0;
         if h & SEG_KIND_MASK == SEG_KIND_ASCENDING {
             let blob_len = r.u32()? as usize;
             let blob = r.take(blob_len)?;
@@ -592,11 +667,24 @@ impl Segment {
                     actual: len,
                 });
             }
-            let max = bitmap.max().unwrap_or(0);
             // `remaining` counts down from the record's `u32` id count, so the
             // narrowing cannot lose bits.
-            let len = len as u32;
-            return Ok(Self::Ascending { bitmap, len, max });
+            let n = len as u32;
+            return Ok(if descending {
+                let min = bitmap.min().unwrap_or(0);
+                Self::Descending {
+                    bitmap,
+                    len: n,
+                    min,
+                }
+            } else {
+                let max = bitmap.max().unwrap_or(0);
+                Self::Ascending {
+                    bitmap,
+                    len: n,
+                    max,
+                }
+            });
         }
 
         let value = read_narrow(r, width_of_code(h >> SEG_VALUE_WIDTH_SHIFT))?;
@@ -605,6 +693,17 @@ impl Segment {
             return Err(DecodeError::BadRange { base: value, count });
         }
         match h & SEG_KIND_MASK {
+            SEG_KIND_RANGE if descending => {
+                // The mirror of the wrap check below: a descending run that
+                // would step past zero describes ids that cannot exist.
+                value
+                    .checked_sub(count - 1)
+                    .ok_or(DecodeError::BadRange { base: value, count })?;
+                Ok(Self::RangeDescending {
+                    base: value,
+                    len: count as u32,
+                })
+            }
             SEG_KIND_RANGE => {
                 // A run that would wrap past u64 describes ids that cannot
                 // exist, and silently truncating it would bind rows to the
@@ -617,6 +716,9 @@ impl Segment {
                     len: count as u32,
                 })
             }
+            // One id however many times has no direction, so the bit is a
+            // malformed segment rather than a variant to interpret.
+            SEG_KIND_REPEAT if descending => Err(DecodeError::BadEncoding(h)),
             SEG_KIND_REPEAT => Ok(Self::Repeat {
                 id: value,
                 count: count as u32,
@@ -632,8 +734,13 @@ impl Segment {
     fn iter(&self) -> Box<dyn Iterator<Item = u64> + '_> {
         match self {
             Self::Range { base, len } => Box::new(*base..*base + u64::from(*len)),
+            Self::RangeDescending { base, len } => {
+                Box::new((*base + 1 - u64::from(*len)..=*base).rev())
+            }
             Self::Repeat { id, count } => Box::new(std::iter::repeat_n(*id, *count as usize)),
             Self::Ascending { bitmap, .. } => Box::new(bitmap.iter()),
+            // The blob is the same set either way; only this is reversed.
+            Self::Descending { bitmap, .. } => Box::new(bitmap.iter().rev()),
         }
     }
 }
@@ -710,13 +817,21 @@ impl IdList {
     ) {
         self.len += 1;
 
-        // The two hot paths, in the order they are taken. Both extend the
-        // segment already there, and neither touches the run tally, because a
+        // The hot paths, in the order they are taken. All of them extend the
+        // segment already there, and none touches the run tally, because a
         // segment's cost is only folded in once it stops growing.
         match self.segments.last_mut() {
             // One more consecutive id — every bulk create, every
             // delete-by-label, from first push to last.
             Some(Segment::Range { base, len }) if id == *base + u64::from(*len) => {
+                *len += 1;
+                return;
+            }
+            // The mirror: one more step down. An endpoint column written by a
+            // downward scan is this from its second id to its last.
+            Some(Segment::RangeDescending { base, len })
+                if *base >= u64::from(*len) && id == *base - u64::from(*len) =>
+            {
                 *len += 1;
                 return;
             }
@@ -734,34 +849,67 @@ impl IdList {
                 *max = id;
                 return;
             }
+            Some(Segment::Descending { bitmap, len, min }) if id < *min => {
+                bitmap.insert(id);
+                *len += 1;
+                *min = id;
+                return;
+            }
             _ => {}
         }
 
-        let continues_run = self.segments.last().is_some_and(|last| id > last.max());
+        // A lone id has no direction, so the one after it decides. Both of
+        // these rewrite that segment rather than opening another.
+        if let Some(&Segment::Range { base, len: 1 }) = self.segments.last() {
+            if id + 1 == base {
+                self.segments.pop();
+                self.segments
+                    .push(Segment::RangeDescending { base, len: 2 });
+                if self.run.desc.is_none() {
+                    self.run.desc = Some(true);
+                }
+                return;
+            }
+            if base == id {
+                // A repeat of the immediately preceding id folds into a
+                // `Repeat` — the supernode case, where a whole endpoint list is
+                // one value. It ends any run: a bitmap holds a value once.
+                self.segments.pop();
+                self.segments.push(Segment::Repeat { id: base, count: 2 });
+                self.run.restart(self.segments.len() - 1);
+                return;
+            }
+        }
+
+        let bounds = self.segments.last().map(|l| (l.min(), l.max()));
+        let continues_run = match (self.run.desc, bounds) {
+            (_, None) => false,
+            (Some(false), Some((_, max))) => id > max,
+            (Some(true), Some((min, _))) => id < min,
+            // Undecided: this id settles it, whichever side it falls.
+            (None, Some((min, max))) => id > max || id < min,
+        };
+
         if continues_run {
+            let (min, max) = bounds.expect("a continuing run has a last segment");
+            if self.run.desc.is_none() {
+                self.run.desc = Some(id < min);
+            }
+            let _ = max;
             // The segment being superseded has its final length now, so this is
             // the moment its contribution is known.
-            if let Some(Segment::Range { base, len }) = self.segments.last() {
-                let (base, len) = (*base, u64::from(*len));
-                self.run.absorb(base, len);
+            if let Some(seg @ (Segment::Range { .. } | Segment::RangeDescending { .. })) =
+                self.segments.last()
+            {
+                let seg = seg.clone();
+                self.run.absorb(&seg);
             }
             self.segments.push(Segment::Range { base: id, len: 1 });
             self.maybe_collapse_run();
         } else {
-            // A repeat or a step backwards ends the run: a bitmap holds
-            // neither, so everything before this is settled.
-            //
-            // A repeat of the *immediately preceding* id folds into a `Repeat`
-            // rather than opening another segment — the supernode case, where a
-            // whole endpoint list is one value.
-            match self.segments.last_mut() {
-                Some(Segment::Range { base, len: 1 }) if *base == id => {
-                    let id = *base;
-                    self.segments.pop();
-                    self.segments.push(Segment::Repeat { id, count: 2 });
-                }
-                _ => self.segments.push(Segment::Range { base: id, len: 1 }),
-            }
+            // A step that reverses the run's own direction ends it: a bitmap
+            // holds one order, so everything before this is settled.
+            self.segments.push(Segment::Range { base: id, len: 1 });
             self.run.restart(self.segments.len() - 1);
         }
     }
@@ -776,12 +924,15 @@ impl IdList {
         let mut bitmap = RoaringTreemap::new();
         let mut len = 0_u32;
         for seg in &self.segments[self.run.start..] {
-            let Segment::Range { base, len: n } = seg else {
-                unreachable!("a run under consideration holds only ranges")
-            };
-            // One bucket operation per range, however many ids it spans.
-            bitmap.insert_range(*base..=*base + u64::from(*n) - 1);
-            len += *n;
+            debug_assert!(
+                matches!(seg, Segment::Range { .. } | Segment::RangeDescending { .. }),
+                "a run under consideration holds only ranges"
+            );
+            // One bucket operation per range, however many ids it spans, and
+            // over the set rather than the direction — the blob is identical
+            // either way, which is why the header carries the order instead.
+            bitmap.insert_range(seg.min()..=seg.max());
+            len += seg.len();
         }
         // `optimize()` is **normative**, not a tuning knob: an unoptimized
         // bitmap serializes to different bytes, so two engines that disagree
@@ -789,10 +940,27 @@ impl IdList {
         // building it by range rather than id by id — see
         // `construction_order_changes_the_bytes`.
         bitmap.optimize();
-        let max = self.segments[self.segments.len() - 1].max();
+        let descending = self.run.desc.unwrap_or(false);
         let start = self.run.start;
+        // The run's last segment holds its extreme: the highest id ascending,
+        // the lowest descending — which is the boundary the next push tests.
+        let last = &self.segments[self.segments.len() - 1];
+        let edge = if descending { last.min() } else { last.max() };
+        let collapsed = if descending {
+            Segment::Descending {
+                bitmap,
+                len,
+                min: edge,
+            }
+        } else {
+            Segment::Ascending {
+                bitmap,
+                len,
+                max: edge,
+            }
+        };
         self.segments.truncate(start);
-        self.segments.push(Segment::Ascending { bitmap, len, max });
+        self.segments.push(collapsed);
         // The run is now that one segment, with nothing left to weigh: ascending
         // ids go straight into the bitmap on the hot path above, and anything
         // else starts a new run.
@@ -844,7 +1012,12 @@ impl IdList {
                 Segment::Range { base, len } => {
                     out.insert_range(*base..=*base + u64::from(*len) - 1);
                 }
-                Segment::Ascending { bitmap, .. } => out |= bitmap,
+                Segment::RangeDescending { base, len } => {
+                    out.insert_range(*base + 1 - u64::from(*len)..=*base);
+                }
+                Segment::Ascending { bitmap, .. } | Segment::Descending { bitmap, .. } => {
+                    out |= bitmap;
+                }
                 // A bitmap holds a value once, so a repeat contributes exactly
                 // its id — the reason a repeat can never *become* a bitmap.
                 Segment::Repeat { id, .. } => {
@@ -1146,14 +1319,108 @@ mod tests {
     }
 
     #[test]
-    fn a_non_ascending_list_never_collapses() {
-        // A bitmap holds neither a repeat nor a step backwards, so this stays
-        // as ranges however many there are.
-        let mut ids: Vec<u64> = (0..1_000).map(|i| i * 2).collect();
+    fn a_descending_gapped_list_collapses_to_a_bitmap() {
+        // The mirror of the test above. The blob is a set, so it is the same
+        // bytes the ascending list of these ids would produce; only the
+        // header's direction bit and the order they come back in differ.
+        let mut ids: Vec<u64> = (0..10_000).map(|i| i * 2).collect();
         ids.reverse();
         let list = IdList::from(ids.as_slice());
-        assert_eq!(list.segment_count(), 1_000);
+        assert!(
+            list.segment_count() < 100,
+            "expected a collapse, got {} segments",
+            list.segment_count()
+        );
+        assert!(
+            matches!(list.segments.last(), Some(Segment::Descending { .. })),
+            "{:?}",
+            list.segments.last()
+        );
         roundtrip(&ids);
+    }
+
+    #[test]
+    fn a_descending_consecutive_list_is_one_segment_at_any_count() {
+        // What an endpoint column written by a downward scan looks like. Before
+        // the descending forms this was one segment per id.
+        for n in [2_u64, 10, 1_000, 1_000_000] {
+            let ids: Vec<u64> = (0..n).rev().collect();
+            let list = IdList::from(ids.as_slice());
+            assert_eq!(list.segment_count(), 1, "n = {n}");
+            assert!(
+                matches!(list.segments[0], Segment::RangeDescending { .. }),
+                "n = {n}"
+            );
+            roundtrip(&ids);
+        }
+    }
+
+    #[test]
+    fn a_reversal_ends_a_run_rather_than_extending_it() {
+        // A bitmap carries one order, so the direction change is where the run
+        // stops — the property the collapse rests on now that both directions
+        // can collapse.
+        let mut ids: Vec<u64> = (0..2_000).map(|i| i * 2).collect();
+        let down: Vec<u64> = ids.iter().rev().map(|i| i + 100_000).collect();
+        ids.extend(down);
+        let list = IdList::from(ids.as_slice());
+        assert!(list.segment_count() >= 2, "the two runs must not merge");
+        roundtrip(&ids);
+    }
+
+    #[test]
+    fn a_descending_repeat_is_still_a_repeat() {
+        // One id however many times has no direction, so it must not acquire
+        // one from the ids around it.
+        let ids: Vec<u64> = vec![9, 9, 9, 9];
+        let list = IdList::from(ids.as_slice());
+        assert_eq!(list.segment_count(), 1);
+        assert!(matches!(list.segments[0], Segment::Repeat { count: 4, .. }));
+        roundtrip(&ids);
+    }
+
+    #[test]
+    fn a_repeat_marked_descending_is_refused() {
+        // The bit has no meaning on a repeat, so a peer that sets it is
+        // malformed rather than something to interpret.
+        let mut buf = Vec::new();
+        Segment::Repeat { id: 7, count: 3 }.encode(&mut buf);
+        buf[0] |= SEG_DESCENDING;
+        let mut r = Reader::new(&buf);
+        assert!(matches!(
+            Segment::decode(&mut r, 3),
+            Err(DecodeError::BadEncoding(_))
+        ));
+    }
+
+    #[test]
+    fn a_descending_range_may_not_step_past_zero() {
+        // The mirror of the wrap check: base 2 with count 5 would name ids
+        // below zero, so it is refused rather than truncated.
+        let mut buf = Vec::new();
+        Segment::RangeDescending { base: 2, len: 5 }.encode(&mut buf);
+        let mut r = Reader::new(&buf);
+        assert!(matches!(
+            Segment::decode(&mut r, 5),
+            Err(DecodeError::BadRange { .. })
+        ));
+    }
+
+    #[test]
+    fn direction_is_the_header_bit_and_the_blob_is_the_same_bytes() {
+        // What justifies a bit rather than two more kinds.
+        let up: Vec<u64> = (0..10_000).map(|i| i * 3).collect();
+        let down: Vec<u64> = up.iter().rev().copied().collect();
+        let a = roundtrip(&up);
+        let b = roundtrip(&down);
+        assert_eq!(a.len(), b.len(), "same shape, same size");
+        // segment count u32, then the segment: header, blob length, blob.
+        assert_eq!(
+            a[4] | SEG_DESCENDING,
+            b[4],
+            "only the direction bit differs"
+        );
+        assert_eq!(a[5..], b[5..], "the blob is identical");
     }
 
     #[test]
