@@ -28,6 +28,32 @@ def download_ldbc_data(filename):
         )
 
 
+def rewrite_csv_header(path, from_id, to_id):
+    """Replace the header row of a self-loop edge CSV in place.
+
+    Self-loop files (e.g. person_knows_person) carry a single id column
+    that both endpoints reference, so the header's first two fields are
+    renamed to the from/to ids the loader queries use.
+
+    Pure-Python rewrite: the previous `sed -i ""` form is BSD/macOS-only
+    and fails on GNU sed (exit 2, `can't read 1s/.../`), and
+    interpolating the header into a sed s/// script corrupts headers
+    containing `/` or `&`. Line endings are normalized to LF.
+    """
+    with open(path) as f:
+        lines = f.read().splitlines()
+    if not lines:
+        raise ValueError(f"empty CSV file: {path}")
+    fields = lines[0].split("|")
+    if len(fields) < 2:
+        raise ValueError(f"CSV header has fewer than 2 fields: {path}")
+    fields[0] = from_id
+    fields[1] = to_id
+    lines[0] = "|".join(fields)
+    with open(path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+
+
 def setup_module(module):
     files = [
         "social_network-sf0.1-CsvBasic-LongDateFormatter.tar.zst",
@@ -383,13 +409,9 @@ def test_load_csv():
 
     for file in edge_files:
         if file["from_label"] == file["to_label"]:
-            with open(f"data/{base_path}/{file['file']}") as f:
-                line = f.readline().split("|")
-                line[0] = file["from_id"]
-                line[1] = file["to_id"]
-                line = "|".join(line)
-                line = line.replace("\n", "")
-                subprocess.run(["sed", "-i", "", f"1s/.*/{line}/", f"data/{base_path}/{file['file']}"], check=True)
+            rewrite_csv_header(
+                f"data/{base_path}/{file['file']}", file["from_id"], file["to_id"]
+            )
         query = f"""
             LOAD CSV WITH HEADERS DELIMITER '|' FROM $file AS row
             RETURN count(row)
